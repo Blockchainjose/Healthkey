@@ -1,0 +1,55 @@
+About This Project
+HealthKey is a decentralized application (dApp) built on the Solana blockchain that empowers individuals to own, track, and optionally monetize their health data — from daily habits to wearable-generated insights.
+
+In a world where corporations control most health data behind closed systems, HealthKey gives ownership back to the user. Through a secure, blockchain-based infrastructure and optional token incentives, users can store key wellness metrics, log personal records, and participate in health-related challenges — all while keeping control of their data.
+
+Vision
+To create the Web3 standard for health data ownership, where:
+
+You control who sees and uses your health records
+
+You decide whether to monetize your data — or keep it private
+
+You get rewarded for staying healthy and active
+
+Whether you're uploading data manually or integrating with wearables like Apple Health, Whoop, or Eight Sleep (coming soon), HealthKey is building the bridge between your body and your blockchain identity.
+
+Core Features
+Personal Health Record Logging
+Log health metrics like weight, sleep, blood pressure, or exercise data.
+
+Blockchain-Based Ownership
+Data is stored via decentralized methods — user-owned, tamper-proof.
+
+Incentivized Rewards System
+Users receive $HEALTH tokens for participating in logging, submitting, and optionally sharing anonymized health data.
+
+Future Dashboard Integration (In Development)
+Real-time data visualization and integration with leading wearables.
+
+Data Pooling + Marketplace Potential
+Users may opt-in to contribute anonymized data into health research pools and receive staking rewards.
+
+Tech Stack
+Solana – ultra-fast, low-cost blockchain
+
+Anchor – smart contract framework
+
+Webflow – frontend UI (Web3-integrated)
+
+JavaScript / Phantom Wallet – wallet connection + interactions
+
+IPFS/Arweave – (planned) for decentralized file storage
+
+Legal & Licensing
+HealthKey is a product of Block Media LLC.
+Trademark registration and DBA filing for “HealthKey” or a related entity are pending.
+
+This repository is licensed under the Business Source License (BSL) v1.1.
+Please refer to the LICENSE file for full details.
+
+Important: Production or commercial use of the HealthKey smart contract is not permitted until January 1, 2029, unless granted explicitly via a commercial license.
+
+Get Involved (Coming Soon)
+We plan to open community contributions and bounty programs soon.
+If you’re a developer, designer, or wellness advocate — follow the repo and join our upcoming Discord.
