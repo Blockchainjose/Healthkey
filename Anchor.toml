@@ -1,0 +1,23 @@
+[toolchain]
+package_manager = "yarn"
+
+[features]
+resolution = true
+skip-lint = false
+
+[programs.localnet]
+healthkey_protocol = "2aPJ91YqkdpSTucNwBxGa42uwoHUCdhx6A4qeBkBrNkJ"
+
+[registry]
+url = "https://api.apr.dev"
+
+[provider]
+cluster = "localnet"
+wallet = "~/.config/solana/id.json"
+
+[scripts]
+test = "yarn run mocha -t 1000000 tests/"
+reward = "node scripts/reward.js"
+
+[dependencies]
+anchor-spl = "0.31.1"

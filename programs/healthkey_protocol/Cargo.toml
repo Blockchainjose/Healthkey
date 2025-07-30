@@ -1,0 +1,24 @@
+[package]
+name        = "healthkey_protocol"
+version     = "0.1.0"
+edition     = "2021"
+description = "Created with Anchor"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name       = "healthkey_protocol"
+
+# ─── Only enable idl-build when you explicitly ask for it ────────────────────
+[features]
+default       = []
+cpi           = ["no-entrypoint"]
+no-entrypoint = []
+no-idl        = []
+no-log-ix-name = []
+idl-build     = ["anchor-spl/idl-build"]
+
+[dependencies]
+anchor-lang = "0.31.1"
+
+# Disable ALL default features (including idl-build) and only pull in `token`
+anchor-spl = { version = "0.31.1", default-features = false, features = ["token"] }
