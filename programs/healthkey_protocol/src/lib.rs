@@ -1,4 +1,5 @@
 use anchor_lang::prelude::*;
+use anchor_spl::associated_token::AssociatedToken;
 use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
 
 declare_id!("2aPJ91YqkdpSTucNwBxGa42uwoHUCdhx6A4qeBkBrNkJ");
@@ -20,25 +21,26 @@ pub mod healthkey_protocol {
         Ok(())
     }
 
+    /// Transfer $HEALTH from the PDA-owned vault token account to the user's ATA.
+    /// Automatically creates the user's ATA if it doesn't exist.
     pub fn reward_user(ctx: Context<RewardUser>, amount: u64) -> Result<()> {
-        msg!("Vault PDA: {}", ctx.accounts.vault_authority.key());
+        require!(amount > 0, ErrorCode::InvalidAmount);
 
+        msg!("Vault PDA: {}", ctx.accounts.vault_authority.key());"init_if_needed"
+
+        // PDA signer seeds for the vault authority
+        let bump = ctx.bumps.vault_authority;
+        let seeds: &[&[u8]] = &[b"vault", &[bump]];
+        let signer: &[&[&[u8]]] = &[seeds];
+
+        // Transfer from vault -> user ATA
         let cpi_accounts = Transfer {
             from: ctx.accounts.vault_token_account.to_account_info(),
             to: ctx.accounts.user_token_account.to_account_info(),
-            authority: ctx.accounts.vault_authority.clone(),
+            authority: ctx.accounts.vault_authority.to_account_info(),
         };
-
         let cpi_program = ctx.accounts.token_program.to_account_info();
 
-        let vault_seeds: &[&[u8]] = &[
-        b"vault",
-        &[ctx.bumps.vault_authority],
-];
-         let signer: &[&[&[u8]]] = &[vault_seeds];
-
-
- 
         token::transfer(
             CpiContext::new_with_signer(cpi_program, cpi_accounts, signer),
             amount,
@@ -67,14 +69,31 @@ pub struct InitializeUserProfile<'info> {
 
 #[derive(Accounts)]
 pub struct RewardUser<'info> {
+    // 1) PDA authority first
     #[account(
-        mut,
         seeds = [b"vault"],
         bump,
     )]
-    /// CHECK: PDA signer — manually verified
-    pub vault_authority: AccountInfo<'info>,
+    /// CHECK: PDA signer — verified by seeds
+    pub vault_authority: UncheckedAccount<'info>,
 
+    // 2) Mint before any ATAs that reference it
+    pub mint: Account<'info, Mint>,
+
+    // 3) Payer/signers before accounts that reference them
+    #[account(mut)]
+    pub user: Signer<'info>,
+
+    // 4) User ATA can reference `user` and `mint` (both are above now)
+    #[account(
+        init_if_needed,
+        payer = user,
+        associated_token::mint = mint,
+        associated_token::authority = user,
+    )]
+    pub user_token_account: Account<'info, TokenAccount>,
+
+    // 5) Vault ATA can reference `vault_authority` and `mint` (both are above)
     #[account(
         mut,
         associated_token::mint = mint,
@@ -82,21 +101,9 @@ pub struct RewardUser<'info> {
     )]
     pub vault_token_account: Account<'info, TokenAccount>,
 
-    #[account(
-        mut,
-        associated_token::mint = mint,
-        associated_token::authority = user,
-    )]
-    pub user_token_account: Account<'info, TokenAccount>,
-
-    /// The user who is being rewarded
-    #[account(mut)]
-    pub user: Signer<'info>,
-
-    /// The token mint for $HEALTH
-    pub mint: Account<'info, Mint>,
-
-    /// SPL token program
+    // Programs needed for ATA creation / CPI
+    pub system_program: Program<'info, System>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
     pub token_program: Program<'info, Token>,
 }
 
@@ -106,4 +113,10 @@ pub struct UserProfile {
     pub arweave_hash: String,
     pub goal: String,
     pub created_at: i64,
+}
+
+#[error_code]
+pub enum ErrorCode {
+    #[msg("Amount must be greater than zero")]
+    InvalidAmount,
 }
