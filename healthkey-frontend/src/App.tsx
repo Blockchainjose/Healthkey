@@ -2,6 +2,10 @@ import React, { useMemo, useState, useEffect } from "react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { useWallet } from "@solana/wallet-adapter-react";
 import { LocalDataSource } from "./lib/data";
+import { useConnection } from "@solana/wallet-adapter-react";
+import { Transaction } from "@solana/web3.js";
+import { createMemoInstruction } from "@solana/spl-memo";
+
 
 /** -----------------------------------------------------------
  * HealthKey Dashboard (Previewable)
@@ -106,7 +110,43 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
 
   // Wallet
-  const { publicKey, connected } = useWallet();
+  const { publicKey, connected, sendTransaction } = useWallet();
+
+  // Connection + tx helpers
+const { connection } = useConnection();
+const [sending, setSending] = useState(false);
+const [lastSig, setLastSig] = useState<string | null>(null);
+
+// Handler: send a simple devnet Memo transaction
+async function sendTestTx() {
+  if (!connected || !publicKey) {
+    setError("Connect your wallet first");
+    return;
+  }
+  try {
+    setSending(true);
+    setError(null);
+    setLastSig(null);
+
+    // Build a tx with a single Memo instruction
+    const tx = new Transaction().add(
+      createMemoInstruction("HealthKey demo: hello, devnet!")
+    );
+
+    // Let the wallet sign & send
+    const sig = await sendTransaction(tx, connection);
+
+    // Optionally wait for confirmation
+    await connection.confirmTransaction(sig, "confirmed");
+
+    setLastSig(sig);
+  } catch (e: any) {
+    console.error(e);
+    setError(e?.message ?? "Failed to send transaction");
+  } finally {
+    setSending(false);
+  }
+}
 
   // Actions (static for now)
   const actions = preview ? MOCK_ACTIONS : [];
@@ -252,9 +292,31 @@ export default function App() {
             ))}
           </ul>
           <div style={{ display: "flex", gap: 12, marginTop: 12 }}>
-            <button style={styles.secondaryBtn}>Connect Device</button>
-            <button style={styles.secondaryBtn}>Join Challenge</button>
-          </div>
+  <button style={styles.secondaryBtn}>Connect Device</button>
+  <button style={styles.secondaryBtn}>Join Challenge</button>
+  <button
+    style={styles.secondaryBtn}
+    onClick={sendTestTx}
+    disabled={sending || !connected}
+    title={connected ? "Send a test memo tx on devnet" : "Connect wallet first"}
+  >
+    {sending ? "Sending…" : "Send Test Tx"}
+  </button>
+</div>
+
+{lastSig && (
+  <div style={{ marginTop: 10 }}>
+    <a
+      href={`https://explorer.solana.com/tx/${lastSig}?cluster=devnet`}
+      target="_blank"
+      rel="noreferrer"
+      style={{ color: COLORS.aqua, textDecoration: "none" }}
+    >
+      View transaction on Solana Explorer →
+    </a>
+  </div>
+)}
+
         </section>
 
         {/* AI Doctor */}
