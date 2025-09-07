@@ -5,6 +5,9 @@ import { LocalDataSource } from "./lib/data";
 import { useConnection } from "@solana/wallet-adapter-react";
 import { Transaction } from "@solana/web3.js";
 import { createMemoInstruction } from "@solana/spl-memo";
+import { WebBundlr } from "@bundlr-network/client";
+
+
 
 
 /** -----------------------------------------------------------
@@ -110,12 +113,18 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
 
   // Wallet
-  const { publicKey, connected, sendTransaction } = useWallet();
+  const { publicKey, connected, sendTransaction, signTransaction, signMessage } = useWallet();
 
   // Connection + tx helpers
 const { connection } = useConnection();
 const [sending, setSending] = useState(false);
 const [lastSig, setLastSig] = useState<string | null>(null);
+
+  // Upload state
+  const [uploading, setUploading] = useState(false);
+  const [arweaveId, setArweaveId] = useState<string | null>(null);
+  const [uploadErr, setUploadErr] = useState<string | null>(null);
+
 
 // Handler: send a simple devnet Memo transaction
 async function sendTestTx() {
@@ -216,151 +225,356 @@ async function sendTestTx() {
     setAiInput("");
   };
 
-  return (
-    <div style={styles.app}>
-      {/* Header */}
-      <header style={styles.header}>
-        <div style={styles.logoWrap}>
-          <div style={styles.logoIcon} />
-          <div style={styles.logoText}>HEALTHKEY</div>
-        </div>
-        <nav style={styles.nav}>
-          <a style={styles.navLink} href="#">Dashboard</a>
-          <a style={styles.navLink} href="#">My Data</a>
-          <a style={styles.navLink} href="#">Rewards</a>
-          <a style={styles.navLink} href="#">Settings</a>
-        </nav>
-        <div style={styles.rightControls}>
-          <div style={styles.previewToggle}>
-            <label style={{ color: COLORS.muted, fontSize: 12, marginRight: 8 }}>Preview Mode</label>
-            <input
-              type="checkbox"
-              checked={preview}
-              onChange={(e) => setPreview(e.target.checked)}
-              title="Toggle Preview Data"
-            />
-          </div>
-          <WalletMultiButton />
-          <div style={styles.avatar} />
-        </div>
-      </header>
+  // --- Step 3: Encrypt + Upload (Bundlr devnet) + memo pointer ---
 
-      {/* Content Grid */}
-      <main style={styles.main}>
-        {/* Health Summary */}
-        <section style={styles.card}>
-          <div style={styles.cardHeader}>Health Summary</div>
-          {loading && <div style={{ color: COLORS.muted, marginTop: 6 }}>Loading data...</div>}
-          {error && <div style={{ color: "tomato", marginTop: 6 }}>{error}</div>}
-          <div style={styles.metricsRow}>
-            <Metric label="Steps" value={summary.steps.toLocaleString()} />
-            <Metric label="Calories" value={`${summary.calories.toLocaleString()} kcal`} />
-            <Metric label="Sleep" value={formatSleep(summary.sleepHrs)} />
-          </div>
-          <div style={{ marginTop: 10 }}>
-            <Sparkline points={summary.sparkline} />
-          </div>
-        </section>
-
-        {/* Rewards */}
-        <section style={styles.card}>
-          <div style={styles.cardHeader}>Rewards Overview</div>
-          {loading && <div style={{ color: COLORS.muted, marginTop: 6 }}>Loading data...</div>}
-          {error && <div style={{ color: "tomato", marginTop: 6 }}>{error}</div>}
-          <div style={{ display: "flex", alignItems: "center", gap: 16, marginTop: 6 }}>
-            <div style={styles.balanceBig}>
-              {rewards.balance.toLocaleString()} <span style={styles.balanceUnit}>HEALTH</span>
-            </div>
-            <div style={{ color: COLORS.muted, fontSize: 14 }}>
-              Tokens Earned This Month{" "}
-              <div style={{ color: COLORS.text, fontSize: 16, marginTop: 4 }}>{rewards.earnedThisMonth}</div>
-            </div>
-          </div>
-          <button style={styles.primaryBtn}>Claim Rewards</button>
-        </section>
-
-        {/* Quick Actions */}
-        <section style={styles.card}>
-          <div style={styles.cardHeader}>Quick Actions</div>
-          <ul style={{ listStyle: "none", padding: 0, marginTop: 8 }}>
-            {actions.map((a, i) => (
-              <li key={i} style={styles.actionItem}>
-                <span style={{ marginRight: 10 }}>{a.icon ?? "•"}</span>
-                <span style={{ color: COLORS.text }}>{a.label}</span>
-                {a.meta && <span style={styles.actionMeta}>{a.meta}</span>}
-              </li>
-            ))}
-          </ul>
-          <div style={{ display: "flex", gap: 12, marginTop: 12 }}>
-  <button style={styles.secondaryBtn}>Connect Device</button>
-  <button style={styles.secondaryBtn}>Join Challenge</button>
-  <button
-    style={styles.secondaryBtn}
-    onClick={sendTestTx}
-    disabled={sending || !connected}
-    title={connected ? "Send a test memo tx on devnet" : "Connect wallet first"}
-  >
-    {sending ? "Sending…" : "Send Test Tx"}
-  </button>
-</div>
-
-{lastSig && (
-  <div style={{ marginTop: 10 }}>
-    <a
-      href={`https://explorer.solana.com/tx/${lastSig}?cluster=devnet`}
-      target="_blank"
-      rel="noreferrer"
-      style={{ color: COLORS.aqua, textDecoration: "none" }}
-    >
-      View transaction on Solana Explorer →
-    </a>
-  </div>
-)}
-
-        </section>
-
-        {/* AI Doctor */}
-        <section style={styles.card}>
-          <div style={styles.cardHeaderRow}>
-            <div>AI Doctor</div>
-            <span style={styles.pillMuted}>Info only · Not medical advice</span>
-          </div>
-
-          <div style={styles.chatBox}>
-            {chat.map((m, i) => (
-              <div
-                key={i}
-                style={{
-                  ...styles.msg,
-                  ...(m.role === "ai" ? styles.msgAI : styles.msgUser),
-                }}
-              >
-                {m.text}
-              </div>
-            ))}
-          </div>
-
-          <div style={styles.chatInputRow}>
-            <input
-              style={styles.input}
-              placeholder="Enter a symptom or health question…"
-              value={aiInput}
-              onChange={(e) => setAiInput(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && handleAiSend()}
-            />
-            <button style={styles.primaryBtn} onClick={handleAiSend}>Send</button>
-          </div>
-        </section>
-      </main>
-
-      {/* Footer mini note to mirror your site vibe */}
-      <footer style={styles.footer}>
-        <span style={{ color: COLORS.muted }}>Proudly built on</span>
-        <span style={styles.solanaBadge}>Solana</span>
-      </footer>
-    </div>
+async function encryptBytes(bytes: Uint8Array): Promise<{
+  cipher: Uint8Array;
+  iv: Uint8Array;
+  jwk: JsonWebKey;
+}> {
+  // AES-GCM 256 client-side encryption
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await crypto.subtle.generateKey(
+    { name: "AES-GCM", length: 256 },
+    true,
+    ["encrypt", "decrypt"]
   );
+  const cipherBuf = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, bytes);
+  const jwk = await crypto.subtle.exportKey("jwk", key); // ⚠️ Store securely in production
+  return { cipher: new Uint8Array(cipherBuf), iv, jwk };
 }
+
+
+async function uploadEncryptedToBundlr(
+  cipher: Uint8Array,
+  contentType = "application/octet-stream"
+): Promise<string> {
+  if (!connected || !publicKey) throw new Error("Connect your wallet first");
+
+  // Wallet wrapper for WebBundlr
+  const bundlrWallet = {
+    publicKey,
+    signTransaction: async (tx: any) => {
+      if (!signTransaction) throw new Error("Wallet cannot sign transactions");
+      return await signTransaction(tx);
+    },
+    sendTransaction: async (tx: any) => {
+      return await sendTransaction(tx, connection);
+    },
+   signMessage: async (msg: Uint8Array) => {
+    if (!signMessage) {
+      throw new Error("Selected Wallet does not support message signing");
+    }
+    return await signMessage(msg);
+  },
+  };
+
+  const bundlr = new WebBundlr(
+    "https://devnet.bundlr.network",
+    "solana",
+    bundlrWallet,
+    { providerUrl: "https://api.devnet.solana.com" }
+  );
+  await bundlr.ready();
+
+  // Build a File from the encrypted bytes (so size matches the cipher)
+  const fileForUpload = new File([cipher], "payload.bin", { type: contentType });
+
+  // Price/fund (BigNumber integer) – use encrypted payload size
+  const price = await bundlr.getPrice(fileForUpload.size);
+  const fundAmt = price.multipliedBy(1.05).integerValue();
+
+  // Debug (optional)
+  console.log("bundlr conf", {
+    api: bundlr.apiUrl,
+    currency: bundlr.currencyConfig?.name,
+    size: fileForUpload.size,
+    price: price.toString(),
+    fundAmt: fundAmt.toString(),
+  });
+
+  await bundlr.fund(fundAmt);
+
+  // ✅ Convert to Buffer (browser polyfill) so uploader gets an accepted type
+  const arrayBuf = await fileForUpload.arrayBuffer();
+  const nodeBuf = Buffer.from(arrayBuf);
+
+  const tags = [{ name: "Content-Type", value: contentType }];
+
+  // ✅ Upload as Buffer
+  const res = await bundlr.uploader.uploadData(nodeBuf as any, { tags });
+
+  const id = (res?.data?.id ?? (res as any)?.id) as string;
+  if (!id) throw new Error("Bundlr upload did not return an id");
+  return id;
+}
+
+async function onSelectFile(file: File) {
+  if (!connected || !publicKey) {
+    setError("Connect your wallet first");
+    return;
+  }
+
+  setUploading(true);
+  setUploadErr(null);
+  setArweaveId(null);
+
+  try {
+    // 1) Read file -> bytes
+    const buf = new Uint8Array(await file.arrayBuffer());
+
+    // 2) Encrypt locally
+    const { cipher /*, iv, jwk*/ } = await encryptBytes(buf);
+
+    // 3) Upload encrypted blob to Bundlr (Arweave devnet)
+    const txId = await uploadEncryptedToBundlr(
+      cipher,
+      file.type || "application/octet-stream"
+    );
+    setArweaveId(txId);
+
+    // 4) (Optional) Write a memo on-chain with the pointer
+    try {
+      const tx = new Transaction().add(
+        createMemoInstruction(`healthkey:uploaded:${txId}`)
+      );
+      tx.feePayer = publicKey!;
+
+      // fresh blockhash to avoid "blockhash not found"
+      const { blockhash, lastValidBlockHeight } =
+        await connection.getLatestBlockhash("finalized");
+      tx.recentBlockhash = blockhash;
+
+      // send + preflight
+      const sig = await sendTransaction(tx, connection, {
+        skipPreflight: false,
+        preflightCommitment: "confirmed",
+      });
+
+      // confirm using the same blockhash tuple
+      await connection.confirmTransaction(
+        { signature: sig, blockhash, lastValidBlockHeight },
+        "confirmed"
+      );
+
+      setLastSig(sig);
+
+      // 5) (Later) Call your program's reward instruction here **AFTER memo confirms**
+      // await program.methods.rewardUser(...).accounts(...).rpc();
+
+    } catch (err: any) {
+      // If it fails, print simulator logs to see the *real* reason
+      try {
+        const simTx = new Transaction().add(
+          createMemoInstruction(`healthkey:uploaded:${txId}`)
+        );
+        const sim = await connection.simulateTransaction(simTx, {
+          sigVerify: false,
+          commitment: "processed",
+        });
+        console.log("simulate err:", sim.value.err, "logs:", sim.value.logs);
+      } catch {}
+      console.error("sendTransaction error:", err);
+      setError(err?.message ?? "Failed to send memo tx");
+      return; // bail early so we don't proceed to rewards
+    }
+  } catch (e: any) {
+    console.error("upload flow error:", e);
+    setUploadErr(e?.message ?? "Upload failed");
+  } finally {
+    setUploading(false);
+  }
+} // ← end of onSelectFile
+
+// ===== Component JSX return (this must be OUTSIDE the function above) =====
+return (
+  <div style={styles.app}>
+    {/* Header */}
+    <header style={styles.header}>
+      <div style={styles.logoWrap}>
+        <div style={styles.logoIcon} />
+        <div style={styles.logoText}>HEALTHKEY</div>
+      </div>
+      <nav style={styles.nav}>
+        <a style={styles.navLink} href="#">Dashboard</a>
+        <a style={styles.navLink} href="#">My Data</a>
+        <a style={styles.navLink} href="#">Rewards</a>
+        <a style={styles.navLink} href="#">Settings</a>
+      </nav>
+      <div style={styles.rightControls}>
+        <div style={styles.previewToggle}>
+          <label style={{ color: COLORS.muted, fontSize: 12, marginRight: 8 }}>Preview Mode</label>
+          <input
+            type="checkbox"
+            checked={preview}
+            onChange={(e) => setPreview(e.target.checked)}
+            title="Toggle Preview Data"
+          />
+        </div>
+        <WalletMultiButton />
+        <div style={styles.avatar} />
+      </div>
+    </header>
+
+    {/* Content Grid */}
+    <main style={styles.main}>
+      {/* Health Summary */}
+      <section style={styles.card}>
+        <div style={styles.cardHeader}>Health Summary</div>
+        {loading && <div style={{ color: COLORS.muted, marginTop: 6 }}>Loading data...</div>}
+        {error && <div style={{ color: "tomato", marginTop: 6 }}>{error}</div>}
+        <div style={styles.metricsRow}>
+          <Metric label="Steps" value={summary.steps.toLocaleString()} />
+          <Metric label="Calories" value={`${summary.calories.toLocaleString()} kcal`} />
+          <Metric label="Sleep" value={formatSleep(summary.sleepHrs)} />
+        </div>
+        <div style={{ marginTop: 10 }}>
+          <Sparkline points={summary.sparkline} />
+        </div>
+      </section>
+
+      {/* Rewards */}
+      <section style={styles.card}>
+        <div style={styles.cardHeader}>Rewards Overview</div>
+        {loading && <div style={{ color: COLORS.muted, marginTop: 6 }}>Loading data...</div>}
+        {error && <div style={{ color: "tomato", marginTop: 6 }}>{error}</div>}
+        <div style={{ display: "flex", alignItems: "center", gap: 16, marginTop: 6 }}>
+          <div style={styles.balanceBig}>
+            {rewards.balance.toLocaleString()} <span style={styles.balanceUnit}>HEALTH</span>
+          </div>
+          <div style={{ color: COLORS.muted, fontSize: 14 }}>
+            Tokens Earned This Month{" "}
+            <div style={{ color: COLORS.text, fontSize: 16, marginTop: 4 }}>{rewards.earnedThisMonth}</div>
+          </div>
+        </div>
+        <button style={styles.primaryBtn}>Claim Rewards</button>
+      </section>
+
+      {/* Quick Actions */}
+      <section style={styles.card}>
+        <div style={styles.cardHeader}>Quick Actions</div>
+
+        <ul style={{ listStyle: "none", padding: 0, marginTop: 8 }}>
+          {actions.map((a, i) => (
+            <li key={i} style={styles.actionItem}>
+              <span style={{ marginRight: 10 }}>{a.icon ?? "•"}</span>
+              <span style={{ color: COLORS.text }}>{a.label}</span>
+              {a.meta && <span style={styles.actionMeta}>{a.meta}</span>}
+            </li>
+          ))}
+        </ul>
+
+        <div style={{ display: "flex", gap: 12, marginTop: 12 }}>
+          <button style={styles.secondaryBtn}>Connect Device</button>
+
+          {/* Upload Health Data */}
+          <button
+            style={styles.secondaryBtn}
+            onClick={() => document.getElementById("fileInput")?.click()}
+          >
+            Upload Health Data
+          </button>
+          <input
+            id="fileInput"
+            type="file"
+            accept=".json,.csv,.pdf,.txt,.xml,image/*"
+            style={{ display: "none" }}
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) onSelectFile(f);
+            }}
+          />
+
+          <button
+            style={styles.secondaryBtn}
+            onClick={sendTestTx}
+            disabled={sending || !connected}
+            title={connected ? "Send a test memo tx on devnet" : "Connect wallet first"}
+          >
+            {sending ? "Sending…" : "Send Test Tx"}
+          </button>
+        </div>
+
+        {/* Upload status + links */}
+        {uploading && (
+          <div style={{ marginTop: 8, color: COLORS.muted }}>
+            Uploading encrypted file to Bundlr…
+          </div>
+        )}
+        {uploadErr && (
+          <div style={{ marginTop: 8, color: "tomato" }}>{uploadErr}</div>
+        )}
+        {arweaveId && (
+          <div style={{ marginTop: 10 }}>
+            <div style={{ marginBottom: 6 }}>
+              Stored encrypted data on Arweave (via Bundlr):
+            </div>
+            <a
+              href={`https://arweave.net/${arweaveId}`}
+              target="_blank"
+              rel="noreferrer"
+              style={{ color: COLORS.aqua, textDecoration: "none" }}
+            >
+              View on Arweave →
+            </a>
+          </div>
+        )}
+        {lastSig && (
+          <div style={{ marginTop: 10 }}>
+            <a
+              href={`https://explorer.solana.com/tx/${lastSig}?cluster=devnet`}
+              target="_blank"
+              rel="noreferrer"
+              style={{ color: COLORS.aqua, textDecoration: "none" }}
+            >
+              View memo transaction →
+            </a>
+          </div>
+        )}
+      </section>
+
+      {/* AI Doctor */}
+      <section style={styles.card}>
+        <div style={styles.cardHeaderRow}>
+          <div>AI Doctor</div>
+          <span style={styles.pillMuted}>Info only · Not medical advice</span>
+        </div>
+
+        <div style={styles.chatBox}>
+          {chat.map((m, i) => (
+            <div
+              key={i}
+              style={{
+                ...styles.msg,
+                ...(m.role === "ai" ? styles.msgAI : styles.msgUser),
+              }}
+            >
+              {m.text}
+            </div>
+          ))}
+        </div>
+
+        <div style={styles.chatInputRow}>
+          <input
+            style={styles.input}
+            placeholder="Enter a symptom or health question…"
+            value={aiInput}
+            onChange={(e) => setAiInput(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && handleAiSend()}
+          />
+          <button style={styles.primaryBtn} onClick={handleAiSend}>Send</button>
+        </div>
+      </section>
+    </main>
+
+    {/* Footer mini note to mirror your site vibe */}
+    <footer style={styles.footer}>
+      <span style={{ color: COLORS.muted }}>Proudly built on</span>
+      <span style={styles.solanaBadge}>Solana</span>
+    </footer>
+  </div>
+);
+} // ← closes: export default function App()
 
 function Metric({ label, value }: { label: string; value: string | number }) {
   return (
