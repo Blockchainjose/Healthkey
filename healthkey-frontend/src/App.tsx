@@ -1,3 +1,20 @@
+/**
+ * ──────────────────────────────────────────────────────────
+ * HealthKey dApp — Built for ownership of your health data
+ *
+ * Bible Verses (Foundation of this project):
+ * 
+ * Psalm 119:11 — "I have hidden your word in my heart that I might not sin against you."
+ * John 14:6 — "I am the way and the truth and the life. No one comes to the Father except through me."
+ * John 1:12 — "Yet to all who did receive him, to those who believed in his name, he gave the right to become children of God."
+ * Ephesians 2:10 — "For we are God’s handiwork, created in Christ Jesus to do good works, which God prepared in advance for us to do."
+ * 2 Chronicles 15:7 — "But as for you, be strong and do not give up, for your work will be rewarded."
+ * Isaiah 41:10 — "So do not fear, for I am with you; do not be dismayed, for I am your God. I will strengthen you and help you; I will uphold you with my righteous right hand."
+ *
+ * ──────────────────────────────────────────────────────────
+ */
+
+
 import React, { useMemo, useState, useEffect } from "react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { useWallet } from "@solana/wallet-adapter-react";
@@ -6,6 +23,7 @@ import { useConnection } from "@solana/wallet-adapter-react";
 import { Transaction } from "@solana/web3.js";
 import { createMemoInstruction } from "@solana/spl-memo";
 import { WebBundlr } from "@bundlr-network/client";
+import healthKeyLogo from "./assets/healthkey-logo.png";
 
 
 
@@ -207,23 +225,39 @@ async function sendTestTx() {
     };
   }, [preview, connected, publicKey]);
 
-  const handleAiSend = () => {
-    if (!aiInput.trim()) return;
-    setChat((c) => [...c, { role: "user", text: aiInput.trim() }]);
-    // Fake AI reply in preview
-    setTimeout(() => {
+const handleAiSend = async () => {
+  if (!aiInput.trim()) return;
+
+  // Add user message to chat
+  const userMsg = { role: "user", text: aiInput.trim() };
+  setChat((c) => [...c, userMsg]);
+  setAiInput("");
+
+  try {
+    const resp = await fetch("http://localhost:8787/api/ai/ask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question: aiInput.trim() }),
+    });
+
+    const data = await resp.json();
+    if (data.ok) {
+      setChat((c) => [...c, { role: "ai", text: data.answer }]);
+    } else {
       setChat((c) => [
         ...c,
-        {
-          role: "ai",
-          text:
-            "This is an informational response. For medical advice, please consult a clinician. " +
-            "Based on your input, I can also check your recent vitals if you allow data context.",
-        },
+        { role: "ai", text: "Error: Could not fetch answer from server." },
       ]);
-    }, 400);
-    setAiInput("");
-  };
+    }
+  } catch (e: any) {
+    console.error("AI fetch error:", e);
+    setChat((c) => [
+      ...c,
+      { role: "ai", text: "Network error. Is the server running?" },
+    ]);
+  }
+};
+
 
   // --- Step 3: Encrypt + Upload (Bundlr devnet) + memo pointer ---
 
@@ -392,8 +426,12 @@ return (
     {/* Header */}
     <header style={styles.header}>
       <div style={styles.logoWrap}>
-        <div style={styles.logoIcon} />
-        <div style={styles.logoText}>HEALTHKEY</div>
+       <img 
+  src={healthKeyLogo} 
+  alt="HealthKey Logo" 
+  style={{ width: 48, height: 48, objectFit: "contain" }} 
+/>
+<div style={styles.logoText}>HEALTHKEY</div>
       </div>
       <nav style={styles.nav}>
         <a style={styles.navLink} href="#">Dashboard</a>
@@ -536,8 +574,8 @@ return (
       {/* AI Doctor */}
       <section style={styles.card}>
         <div style={styles.cardHeaderRow}>
-          <div>AI Doctor</div>
-          <span style={styles.pillMuted}>Info only · Not medical advice</span>
+          <div>Ask HealthKey</div>
+          <span style={styles.pillMuted}>This is information only · Not medical advice</span>
         </div>
 
         <div style={styles.chatBox}>
@@ -562,7 +600,7 @@ return (
             onChange={(e) => setAiInput(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && handleAiSend()}
           />
-          <button style={styles.primaryBtn} onClick={handleAiSend}>Send</button>
+          <button style={styles.primaryBtn} onClick={handleAiSend}>Ask</button>
         </div>
       </section>
     </main>
@@ -608,13 +646,11 @@ const styles: Record<string, React.CSSProperties> = {
     backdropFilter: "blur(6px)",
   },
   logoWrap: { display: "flex", alignItems: "center", gap: 10 },
-  logoIcon: {
-    width: 22,
-    height: 22,
-    borderRadius: 4,
-    background: `radial-gradient(circle at 30% 30%, ${COLORS.green}, ${COLORS.aqua})`,
-    boxShadow: `0 0 14px ${COLORS.green}`,
-  },
+  logoImg: {
+  width: 48,   // increase size here
+  height: 48,  // keep square proportions, adjust if needed
+  objectFit: "contain",
+},
   logoText: { fontWeight: 800, letterSpacing: 1, color: COLORS.green },
   nav: { display: "flex", gap: 18, alignItems: "center" },
   navLink: { color: COLORS.muted, textDecoration: "none", fontSize: 14 },

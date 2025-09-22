@@ -27,3 +27,32 @@ dist-ssr
 **/id.json
 **/keypair.json
 **/target/deploy/*.json
+
+ # --- App builds / caches
+.cache/
+build/
+coverage/
+
+# --- Env & secrets (never commit)
+.env
+.env.*
+*.key
+*.pem
+*.p12
+*.der
+*.crt
+*.cert
+*.enc
+*.secret
+*.keystore
+*.jwk
+*.json.secret
+treasury-keypair.json
+
+# --- Solana / Anchor build artifacts
+**/target/                   # ignore all target folders
+!**/target/idl/*.json        # (optional) keep IDLs if you want them in repo
+!**/target/types/*.ts        # (optional) keep generated TS types
+
+# --- OS / misc
+Thumbs.db
