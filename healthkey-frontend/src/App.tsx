@@ -17,16 +17,12 @@
 
 import React, { useMemo, useState, useEffect } from "react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
-import { useWallet } from "@solana/wallet-adapter-react";
+import { useWallet, useConnection } from "@solana/wallet-adapter-react";
 import { LocalDataSource } from "./lib/data";
-import { useConnection } from "@solana/wallet-adapter-react";
 import { Transaction } from "@solana/web3.js";
 import { createMemoInstruction } from "@solana/spl-memo";
 import { WebBundlr } from "@bundlr-network/client";
 import healthKeyLogo from "./assets/healthkey-logo.png";
-
-
-
 
 /** -----------------------------------------------------------
  * HealthKey Dashboard (Previewable)
@@ -76,10 +72,50 @@ const MOCK_ACTIONS: QuickAction[] = [
   { label: "Blood Pressure Logged", meta: "Apr 24, 2024", icon: "🩺" },
 ];
 
+// --- decrypt helper (AES-GCM) ---
+async function decryptBytes(
+  cipher: Uint8Array,
+  iv: Uint8Array,
+  jwk: JsonWebKey
+): Promise<Uint8Array> {
+  const key = await crypto.subtle.importKey(
+    "jwk",
+    jwk,
+    { name: "AES-GCM" },
+    false,
+    ["decrypt"]
+  );
+  const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, cipher);
+  return new Uint8Array(plain);
+}
+
 function formatSleep(hours: number) {
   const h = Math.floor(hours);
   const m = Math.round((hours - h) * 60);
   return `${h}h ${m}m`;
+}
+
+function sniffMime(u8: Uint8Array): string | null {
+  // JPEG
+  if (u8.length > 3 && u8[0] === 0xff && u8[1] === 0xd8 && u8[2] === 0xff) return "image/jpeg";
+  // PNG
+  if (
+    u8.length > 8 &&
+    u8[0] === 0x89 && u8[1] === 0x50 && u8[2] === 0x4e && u8[3] === 0x47 &&
+    u8[4] === 0x0d && u8[5] === 0x0a && u8[6] === 0x1a && u8[7] === 0x0a
+  ) return "image/png";
+  // GIF
+  if (
+    u8.length > 6 &&
+    u8[0] === 0x47 && u8[1] === 0x49 && u8[2] === 0x46 && u8[3] === 0x38 &&
+    (u8[4] === 0x39 || u8[4] === 0x37) && u8[5] === 0x61
+  ) return "image/gif";
+  // PDF
+  if (u8.length > 4 && u8[0] === 0x25 && u8[1] === 0x50 && u8[2] === 0x44 && u8[3] === 0x46) return "application/pdf";
+  // SVG
+  const head = new TextDecoder().decode(u8.slice(0, 256)).trimStart().slice(0, 10).toLowerCase();
+  if (head.startsWith("<svg")) return "image/svg+xml";
+  return null;
 }
 
 function Sparkline({
@@ -134,46 +170,63 @@ export default function App() {
   const { publicKey, connected, sendTransaction, signTransaction, signMessage } = useWallet();
 
   // Connection + tx helpers
-const { connection } = useConnection();
-const [sending, setSending] = useState(false);
-const [lastSig, setLastSig] = useState<string | null>(null);
+  const { connection } = useConnection();
+  const [sending, setSending] = useState(false);
+  const [lastSig, setLastSig] = useState<string | null>(null);
 
   // Upload state
   const [uploading, setUploading] = useState(false);
   const [arweaveId, setArweaveId] = useState<string | null>(null);
   const [uploadErr, setUploadErr] = useState<string | null>(null);
 
+  const [lastUpload, setLastUpload] = useState<{
+    id: string;
+    iv: Uint8Array;
+    jwk: JsonWebKey;
+    mime: string;
+  } | null>(null);
 
-// Handler: send a simple devnet Memo transaction
-async function sendTestTx() {
-  if (!connected || !publicKey) {
-    setError("Connect your wallet first");
-    return;
+  const [decryptedPreview, setDecryptedPreview] = useState<{
+    text?: string;
+    json?: any;
+  } | null>(null);
+  const [decryptedBlobUrl, setDecryptedBlobUrl] = useState<string | null>(null);
+
+  // Revoke object URL when it changes/unmounts
+  useEffect(() => {
+    return () => {
+      if (decryptedBlobUrl) URL.revokeObjectURL(decryptedBlobUrl);
+    };
+  }, [decryptedBlobUrl]);
+
+  // Handler: send a simple devnet Memo transaction
+  async function sendTestTx() {
+    if (!connected || !publicKey) {
+      setError("Connect your wallet first");
+      return;
+    }
+    try {
+      setSending(true);
+      setError(null);
+      setLastSig(null);
+
+      // Build a tx with a single Memo instruction
+      const tx = new Transaction().add(createMemoInstruction("HealthKey demo: hello, devnet!"));
+
+      // Let the wallet sign & send
+      const sig = await sendTransaction(tx, connection);
+
+      // Optionally wait for confirmation
+      await connection.confirmTransaction(sig, "confirmed");
+
+      setLastSig(sig);
+    } catch (e: any) {
+      console.error(e);
+      setError(e?.message ?? "Failed to send transaction");
+    } finally {
+      setSending(false);
+    }
   }
-  try {
-    setSending(true);
-    setError(null);
-    setLastSig(null);
-
-    // Build a tx with a single Memo instruction
-    const tx = new Transaction().add(
-      createMemoInstruction("HealthKey demo: hello, devnet!")
-    );
-
-    // Let the wallet sign & send
-    const sig = await sendTransaction(tx, connection);
-
-    // Optionally wait for confirmation
-    await connection.confirmTransaction(sig, "confirmed");
-
-    setLastSig(sig);
-  } catch (e: any) {
-    console.error(e);
-    setError(e?.message ?? "Failed to send transaction");
-  } finally {
-    setSending(false);
-  }
-}
 
   // Actions (static for now)
   const actions = preview ? MOCK_ACTIONS : [];
@@ -225,63 +278,63 @@ async function sendTestTx() {
     };
   }, [preview, connected, publicKey]);
 
-const handleAiSend = async () => {
-  if (!aiInput.trim()) return;
+  const handleAiSend = async () => {
+    if (!aiInput.trim()) return;
 
-  // Add user message to chat
-  const userMsg = { role: "user", text: aiInput.trim() };
-  setChat((c) => [...c, userMsg]);
-  setAiInput("");
+    // Add user message to chat
+    const userMsg = { role: "user", text: aiInput.trim() };
+    setChat((c) => [...c, userMsg]);
+    setAiInput("");
 
-  try {
-    const resp = await fetch("http://localhost:8787/api/ai/ask", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question: aiInput.trim() }),
-    });
+    try {
+      const resp = await fetch("http://localhost:8787/api/ai/ask", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question: aiInput.trim() }),
+      });
 
-    const data = await resp.json();
-    if (data.ok) {
-      setChat((c) => [...c, { role: "ai", text: data.answer }]);
-    } else {
+      const data = await resp.json();
+      if (data.ok) {
+        setChat((c) => [...c, { role: "ai", text: data.answer }]);
+      } else {
+        setChat((c) => [
+          ...c,
+          { role: "ai", text: "Error: Could not fetch answer from server." },
+        ]);
+      }
+    } catch (e: any) {
+      console.error("AI fetch error:", e);
       setChat((c) => [
         ...c,
-        { role: "ai", text: "Error: Could not fetch answer from server." },
+        { role: "ai", text: "Network error. Is the server running?" },
       ]);
     }
-  } catch (e: any) {
-    console.error("AI fetch error:", e);
-    setChat((c) => [
-      ...c,
-      { role: "ai", text: "Network error. Is the server running?" },
-    ]);
-  }
-};
-
+  };
 
   // --- Step 3: Encrypt + Upload (Bundlr devnet) + memo pointer ---
+  async function encryptBytes(bytes: Uint8Array): Promise<{
+    cipher: Uint8Array;
+    iv: Uint8Array;
+    jwk: JsonWebKey;
+  }> {
+    // AES-GCM 256 client-side encryption
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const key = await crypto.subtle.generateKey(
+      { name: "AES-GCM", length: 256 },
+      true,
+      ["encrypt", "decrypt"]
+    );
+    const cipherBuf = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, bytes);
+    const jwk = await crypto.subtle.exportKey("jwk", key); // ⚠️ Store securely in production
+    return { cipher: new Uint8Array(cipherBuf), iv, jwk };
+  }
 
-async function encryptBytes(bytes: Uint8Array): Promise<{
-  cipher: Uint8Array;
-  iv: Uint8Array;
-  jwk: JsonWebKey;
-}> {
-  // AES-GCM 256 client-side encryption
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const key = await crypto.subtle.generateKey(
-    { name: "AES-GCM", length: 256 },
-    true,
-    ["encrypt", "decrypt"]
-  );
-  const cipherBuf = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, bytes);
-  const jwk = await crypto.subtle.exportKey("jwk", key); // ⚠️ Store securely in production
-  return { cipher: new Uint8Array(cipherBuf), iv, jwk };
-}
-
-
+  // --- Upload to Bundlr (browser-safe via transaction flow) ---
 async function uploadEncryptedToBundlr(
   cipher: Uint8Array,
-  contentType = "application/octet-stream"
+  contentType = "application/octet-stream",
+  iv?: Uint8Array,
+  jwk?: JsonWebKey
 ): Promise<string> {
   if (!connected || !publicKey) throw new Error("Connect your wallet first");
 
@@ -295,12 +348,12 @@ async function uploadEncryptedToBundlr(
     sendTransaction: async (tx: any) => {
       return await sendTransaction(tx, connection);
     },
-   signMessage: async (msg: Uint8Array) => {
-    if (!signMessage) {
-      throw new Error("Selected Wallet does not support message signing");
-    }
-    return await signMessage(msg);
-  },
+    signMessage: async (msg: Uint8Array) => {
+      if (!signMessage) {
+        throw new Error("Selected Wallet does not support message signing");
+      }
+      return await signMessage(msg);
+    },
   };
 
   const bundlr = new WebBundlr(
@@ -311,307 +364,455 @@ async function uploadEncryptedToBundlr(
   );
   await bundlr.ready();
 
-  // Build a File from the encrypted bytes (so size matches the cipher)
-  const fileForUpload = new File([cipher], "payload.bin", { type: contentType });
+  // Create a Bundlr tx directly from the Uint8Array (works in browser)
+  const tags = [{ name: "Content-Type", value: contentType }];
+  const tx = await bundlr.createTransaction(cipher, { tags });
 
-  // Price/fund (BigNumber integer) – use encrypted payload size
-  const price = await bundlr.getPrice(fileForUpload.size);
+  // Fund based on tx size
+  const price = await bundlr.getPrice(tx.size);
   const fundAmt = price.multipliedBy(1.05).integerValue();
 
-  // Debug (optional)
   console.log("bundlr conf", {
     api: bundlr.apiUrl,
     currency: bundlr.currencyConfig?.name,
-    size: fileForUpload.size,
+    size: tx.size,
     price: price.toString(),
     fundAmt: fundAmt.toString(),
   });
 
   await bundlr.fund(fundAmt);
 
-  // ✅ Convert to Buffer (browser polyfill) so uploader gets an accepted type
-  const arrayBuf = await fileForUpload.arrayBuffer();
-  const nodeBuf = Buffer.from(arrayBuf);
+  // Sign & upload
+  await tx.sign();
+  const res = await tx.upload();
 
-  const tags = [{ name: "Content-Type", value: contentType }];
-
-  // ✅ Upload as Buffer
-  const res = await bundlr.uploader.uploadData(nodeBuf as any, { tags });
-
-  const id = (res?.data?.id ?? (res as any)?.id) as string;
+  const id = (res?.data?.id ?? res?.id ?? tx.id) as string;
   if (!id) throw new Error("Bundlr upload did not return an id");
+
+  // Save info needed for decrypting later (dev-only)
+  if (iv && jwk) {
+    setLastUpload({ id, iv, jwk, mime: contentType });
+    setDecryptedPreview(null);
+  }
+
   return id;
 }
 
-async function onSelectFile(file: File) {
-  if (!connected || !publicKey) {
-    setError("Connect your wallet first");
-    return;
-  }
 
-  setUploading(true);
-  setUploadErr(null);
-  setArweaveId(null);
+  // --- Select + Encrypt + Upload + Memo pointer ---
+  async function onSelectFile(file: File) {
+    if (!connected || !publicKey) {
+      setError("Connect your wallet first");
+      return;
+    }
 
-  try {
-    // 1) Read file -> bytes
-    const buf = new Uint8Array(await file.arrayBuffer());
+    setUploading(true);
+    setUploadErr(null);
+    setArweaveId(null);
 
-    // 2) Encrypt locally
-    const { cipher /*, iv, jwk*/ } = await encryptBytes(buf);
-
-    // 3) Upload encrypted blob to Bundlr (Arweave devnet)
-    const txId = await uploadEncryptedToBundlr(
-      cipher,
-      file.type || "application/octet-stream"
-    );
-    setArweaveId(txId);
-
-    // 4) (Optional) Write a memo on-chain with the pointer
     try {
-      const tx = new Transaction().add(
-        createMemoInstruction(`healthkey:uploaded:${txId}`)
+      // 1) Read file -> bytes
+      const buf = new Uint8Array(await file.arrayBuffer());
+
+      // 2) Encrypt locally (AES-GCM)
+      const { cipher, iv, jwk } = await encryptBytes(buf);
+
+      // 3) Upload encrypted blob to Bundlr (DEVNET)
+      const txId = await uploadEncryptedToBundlr(
+        cipher,
+        file.type || "application/octet-stream",
+        iv,
+        jwk
       );
-      tx.feePayer = publicKey!;
+      setArweaveId(txId);
 
-      // fresh blockhash to avoid "blockhash not found"
-      const { blockhash, lastValidBlockHeight } =
-        await connection.getLatestBlockhash("finalized");
-      tx.recentBlockhash = blockhash;
-
-      // send + preflight
-      const sig = await sendTransaction(tx, connection, {
-        skipPreflight: false,
-        preflightCommitment: "confirmed",
-      });
-
-      // confirm using the same blockhash tuple
-      await connection.confirmTransaction(
-        { signature: sig, blockhash, lastValidBlockHeight },
-        "confirmed"
-      );
-
-      setLastSig(sig);
-
-      // 5) (Later) Call your program's reward instruction here **AFTER memo confirms**
-      // await program.methods.rewardUser(...).accounts(...).rpc();
-
-    } catch (err: any) {
-      // If it fails, print simulator logs to see the *real* reason
+      // 4) (Optional) Write a memo on Solana with the pointer
       try {
-        const simTx = new Transaction().add(
+        const tx = new Transaction().add(
           createMemoInstruction(`healthkey:uploaded:${txId}`)
         );
-        const sim = await connection.simulateTransaction(simTx, {
-          sigVerify: false,
-          commitment: "processed",
+        tx.feePayer = publicKey!;
+
+        // fresh blockhash to avoid "blockhash not found"
+        const { blockhash, lastValidBlockHeight } =
+          await connection.getLatestBlockhash("finalized");
+        tx.recentBlockhash = blockhash;
+
+        // send + preflight
+        const sig = await sendTransaction(tx, connection, {
+          skipPreflight: false,
+          preflightCommitment: "confirmed",
         });
-        console.log("simulate err:", sim.value.err, "logs:", sim.value.logs);
-      } catch {}
-      console.error("sendTransaction error:", err);
-      setError(err?.message ?? "Failed to send memo tx");
-      return; // bail early so we don't proceed to rewards
+
+        // confirm using the same blockhash tuple
+        await connection.confirmTransaction(
+          { signature: sig, blockhash, lastValidBlockHeight },
+          "confirmed"
+        );
+
+        setLastSig(sig);
+      } catch (err: any) {
+        // If memo fails, try to surface simulator logs
+        try {
+          const simTx = new Transaction().add(
+            createMemoInstruction(`healthkey:uploaded:${txId}`)
+          );
+          const sim = await connection.simulateTransaction(simTx, {
+            sigVerify: false,
+            commitment: "processed",
+          });
+          console.log("simulate err:", sim.value.err, "logs:", sim.value.logs);
+        } catch {}
+        console.error("sendTransaction error:", err);
+        setError(err?.message ?? "Failed to send memo tx");
+        return;
+      }
+    } catch (e: any) {
+      console.error("upload flow error:", e);
+      setUploadErr(e?.message ?? "Upload failed");
+    } finally {
+      setUploading(false);
     }
-  } catch (e: any) {
-    console.error("upload flow error:", e);
-    setUploadErr(e?.message ?? "Upload failed");
-  } finally {
-    setUploading(false);
+  } // ← end of onSelectFile
+
+  // --- Retrieve & Decrypt (fixed: now in component scope) ---
+  const handleRetrieve = async () => {
+    try {
+      if (!lastUpload) return;
+
+      // Fetch ciphertext from devnet gateway
+      const url = `https://gateway.irys.xyz/${lastUpload.id}`;
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error(`Fetch failed: ${resp.status}`);
+      const cipher = new Uint8Array(await resp.arrayBuffer());
+
+     // ...after you compute `plain` (the decrypted Uint8Array)
+const savedMime = (lastUpload.mime || "").toLowerCase();
+// Fix common alias
+const normalizedSavedMime = savedMime === "image/jpg" ? "image/jpeg" : savedMime;
+
+// If no/unknown MIME, try to sniff from bytes
+const sniffed = sniffMime(plain);
+const mime = normalizedSavedMime || sniffed || "application/octet-stream";
+
+if (
+  mime.startsWith("text/") ||
+  mime === "application/json" ||
+  mime === "application/xml" ||
+  mime === "image/svg+xml"
+) {
+  const text = new TextDecoder().decode(plain);
+  try {
+    if (mime === "application/json") {
+      setDecryptedPreview({ json: JSON.parse(text) });
+    } else {
+      setDecryptedPreview({ text });
+    }
+  } catch {
+    setDecryptedPreview({ text });
   }
-} // ← end of onSelectFile
+  if (decryptedBlobUrl) URL.revokeObjectURL(decryptedBlobUrl);
+  setDecryptedBlobUrl(null);
+} else {
+  const blob = new Blob([plain], { type: mime });
+  const objUrl = URL.createObjectURL(blob);
+  if (decryptedBlobUrl) URL.revokeObjectURL(decryptedBlobUrl);
+  setDecryptedBlobUrl(objUrl);
+  setDecryptedPreview(null);
+}
 
-// ===== Component JSX return (this must be OUTSIDE the function above) =====
-return (
-  <div style={styles.app}>
-    {/* Header */}
-    <header style={styles.header}>
-      <div style={styles.logoWrap}>
-       <img 
-  src={healthKeyLogo} 
-  alt="HealthKey Logo" 
-  style={{ width: 48, height: 48, objectFit: "contain" }} 
-/>
-<div style={styles.logoText}>HEALTHKEY</div>
-      </div>
-      <nav style={styles.nav}>
-        <a style={styles.navLink} href="#">Dashboard</a>
-        <a style={styles.navLink} href="#">My Data</a>
-        <a style={styles.navLink} href="#">Rewards</a>
-        <a style={styles.navLink} href="#">Settings</a>
-      </nav>
-      <div style={styles.rightControls}>
-        <div style={styles.previewToggle}>
-          <label style={{ color: COLORS.muted, fontSize: 12, marginRight: 8 }}>Preview Mode</label>
-          <input
-            type="checkbox"
-            checked={preview}
-            onChange={(e) => setPreview(e.target.checked)}
-            title="Toggle Preview Data"
+    } catch (err) {
+      console.error("decrypt failed", err);
+      setDecryptedPreview({ text: "❌ Failed to decrypt" });
+      if (decryptedBlobUrl) URL.revokeObjectURL(decryptedBlobUrl);
+      setDecryptedBlobUrl(null);
+    }
+  };
+
+  // ===== Component JSX return =====
+  return (
+    <div style={styles.app}>
+      {/* Header */}
+      <header style={styles.header}>
+        <div style={styles.logoWrap}>
+          <img
+            src={healthKeyLogo}
+            alt="HealthKey Logo"
+            style={{ width: 48, height: 48, objectFit: "contain" }}
           />
+          <div style={styles.logoText}>HEALTHKEY</div>
         </div>
-        <WalletMultiButton />
-        <div style={styles.avatar} />
-      </div>
-    </header>
-
-    {/* Content Grid */}
-    <main style={styles.main}>
-      {/* Health Summary */}
-      <section style={styles.card}>
-        <div style={styles.cardHeader}>Health Summary</div>
-        {loading && <div style={{ color: COLORS.muted, marginTop: 6 }}>Loading data...</div>}
-        {error && <div style={{ color: "tomato", marginTop: 6 }}>{error}</div>}
-        <div style={styles.metricsRow}>
-          <Metric label="Steps" value={summary.steps.toLocaleString()} />
-          <Metric label="Calories" value={`${summary.calories.toLocaleString()} kcal`} />
-          <Metric label="Sleep" value={formatSleep(summary.sleepHrs)} />
-        </div>
-        <div style={{ marginTop: 10 }}>
-          <Sparkline points={summary.sparkline} />
-        </div>
-      </section>
-
-      {/* Rewards */}
-      <section style={styles.card}>
-        <div style={styles.cardHeader}>Rewards Overview</div>
-        {loading && <div style={{ color: COLORS.muted, marginTop: 6 }}>Loading data...</div>}
-        {error && <div style={{ color: "tomato", marginTop: 6 }}>{error}</div>}
-        <div style={{ display: "flex", alignItems: "center", gap: 16, marginTop: 6 }}>
-          <div style={styles.balanceBig}>
-            {rewards.balance.toLocaleString()} <span style={styles.balanceUnit}>HEALTH</span>
+        <nav style={styles.nav}>
+          <a style={styles.navLink} href="#">Dashboard</a>
+          <a style={styles.navLink} href="#">My Data</a>
+          <a style={styles.navLink} href="#">Rewards</a>
+          <a style={styles.navLink} href="#">Settings</a>
+        </nav>
+        <div style={styles.rightControls}>
+          <div style={styles.previewToggle}>
+            <label style={{ color: COLORS.muted, fontSize: 12, marginRight: 8 }}>Preview Mode</label>
+            <input
+              type="checkbox"
+              checked={preview}
+              onChange={(e) => setPreview(e.target.checked)}
+              title="Toggle Preview Data"
+            />
           </div>
-          <div style={{ color: COLORS.muted, fontSize: 14 }}>
-            Tokens Earned This Month{" "}
-            <div style={{ color: COLORS.text, fontSize: 16, marginTop: 4 }}>{rewards.earnedThisMonth}</div>
-          </div>
+          <WalletMultiButton />
+          <div style={styles.avatar} />
         </div>
-        <button style={styles.primaryBtn}>Claim Rewards</button>
-      </section>
+      </header>
 
-      {/* Quick Actions */}
-      <section style={styles.card}>
-        <div style={styles.cardHeader}>Quick Actions</div>
-
-        <ul style={{ listStyle: "none", padding: 0, marginTop: 8 }}>
-          {actions.map((a, i) => (
-            <li key={i} style={styles.actionItem}>
-              <span style={{ marginRight: 10 }}>{a.icon ?? "•"}</span>
-              <span style={{ color: COLORS.text }}>{a.label}</span>
-              {a.meta && <span style={styles.actionMeta}>{a.meta}</span>}
-            </li>
-          ))}
-        </ul>
-
-        <div style={{ display: "flex", gap: 12, marginTop: 12 }}>
-          <button style={styles.secondaryBtn}>Connect Device</button>
-
-          {/* Upload Health Data */}
-          <button
-            style={styles.secondaryBtn}
-            onClick={() => document.getElementById("fileInput")?.click()}
-          >
-            Upload Health Data
-          </button>
-          <input
-            id="fileInput"
-            type="file"
-            accept=".json,.csv,.pdf,.txt,.xml,image/*"
-            style={{ display: "none" }}
-            onChange={(e) => {
-              const f = e.target.files?.[0];
-              if (f) onSelectFile(f);
-            }}
-          />
-
-          <button
-            style={styles.secondaryBtn}
-            onClick={sendTestTx}
-            disabled={sending || !connected}
-            title={connected ? "Send a test memo tx on devnet" : "Connect wallet first"}
-          >
-            {sending ? "Sending…" : "Send Test Tx"}
-          </button>
-        </div>
-
-        {/* Upload status + links */}
-        {uploading && (
-          <div style={{ marginTop: 8, color: COLORS.muted }}>
-            Uploading encrypted file to Bundlr…
+      {/* Content Grid */}
+      <main style={styles.main}>
+        {/* Health Summary */}
+        <section style={styles.card}>
+          <div style={styles.cardHeader}>Health Summary</div>
+          {loading && <div style={{ color: COLORS.muted, marginTop: 6 }}>Loading data...</div>}
+          {error && <div style={{ color: "tomato", marginTop: 6 }}>{error}</div>}
+          <div style={styles.metricsRow}>
+            <Metric label="Steps" value={summary.steps.toLocaleString()} />
+            <Metric label="Calories" value={`${summary.calories.toLocaleString()} kcal`} />
+            <Metric label="Sleep" value={formatSleep(summary.sleepHrs)} />
           </div>
-        )}
-        {uploadErr && (
-          <div style={{ marginTop: 8, color: "tomato" }}>{uploadErr}</div>
-        )}
-        {arweaveId && (
           <div style={{ marginTop: 10 }}>
-            <div style={{ marginBottom: 6 }}>
-              Stored encrypted data on Arweave (via Bundlr):
+            <Sparkline points={summary.sparkline} />
+          </div>
+        </section>
+
+        {/* Rewards */}
+        <section style={styles.card}>
+          <div style={styles.cardHeader}>Rewards Overview</div>
+          {loading && <div style={{ color: COLORS.muted, marginTop: 6 }}>Loading data...</div>}
+          {error && <div style={{ color: "tomato", marginTop: 6 }}>{error}</div>}
+          <div style={{ display: "flex", alignItems: "center", gap: 16, marginTop: 6 }}>
+            <div style={styles.balanceBig}>
+              {rewards.balance.toLocaleString()} <span style={styles.balanceUnit}>HEALTH</span>
             </div>
-            <a
-              href={`https://arweave.net/${arweaveId}`}
-              target="_blank"
-              rel="noreferrer"
-              style={{ color: COLORS.aqua, textDecoration: "none" }}
-            >
-              View on Arweave →
-            </a>
+            <div style={{ color: COLORS.muted, fontSize: 14 }}>
+              Tokens Earned This Month{" "}
+              <div style={{ color: COLORS.text, fontSize: 16, marginTop: 4 }}>{rewards.earnedThisMonth}</div>
+            </div>
           </div>
-        )}
-        {lastSig && (
-          <div style={{ marginTop: 10 }}>
-            <a
-              href={`https://explorer.solana.com/tx/${lastSig}?cluster=devnet`}
-              target="_blank"
-              rel="noreferrer"
-              style={{ color: COLORS.aqua, textDecoration: "none" }}
+          <button style={styles.primaryBtn}>Claim Rewards</button>
+        </section>
+
+        {/* Quick Actions */}
+        <section style={styles.card}>
+          <div style={styles.cardHeader}>Quick Actions</div>
+
+          <ul style={{ listStyle: "none", padding: 0, marginTop: 8 }}>
+            {actions.map((a, i) => (
+              <li key={i} style={styles.actionItem}>
+                <span style={{ marginRight: 10 }}>{a.icon ?? "•"}</span>
+                <span style={{ color: COLORS.text }}>{a.label}</span>
+                {a.meta && <span style={styles.actionMeta}>{a.meta}</span>}
+              </li>
+            ))}
+          </ul>
+
+          <div style={{ display: "flex", gap: 12, marginTop: 12 }}>
+            <button style={styles.secondaryBtn}>Connect Device</button>
+
+            {/* Upload Health Data */}
+            <button
+              style={styles.secondaryBtn}
+              onClick={() => document.getElementById("fileInput")?.click()}
             >
-              View memo transaction →
-            </a>
-          </div>
-        )}
-      </section>
-
-      {/* AI Doctor */}
-      <section style={styles.card}>
-        <div style={styles.cardHeaderRow}>
-          <div>Ask HealthKey</div>
-          <span style={styles.pillMuted}>This is information only · Not medical advice</span>
-        </div>
-
-        <div style={styles.chatBox}>
-          {chat.map((m, i) => (
-            <div
-              key={i}
-              style={{
-                ...styles.msg,
-                ...(m.role === "ai" ? styles.msgAI : styles.msgUser),
+              Upload Health Data
+            </button>
+            <input
+              id="fileInput"
+              type="file"
+              accept=".json,.csv,.pdf,.txt,.xml,image/*"
+              style={{ display: "none" }}
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) onSelectFile(f);
               }}
+            />
+
+            <button
+              style={styles.secondaryBtn}
+              onClick={sendTestTx}
+              disabled={sending || !connected}
+              title={connected ? "Send a test memo tx on devnet" : "Connect wallet first"}
             >
-              {m.text}
+              {sending ? "Sending…" : "Send Test Tx"}
+            </button>
+          </div>
+
+          <button style={styles.secondaryBtn} onClick={handleRetrieve}>
+            Retrieve & Decrypt Last Upload
+          </button>
+
+          {/* Upload status + links */}
+          {uploading && (
+            <div style={{ marginTop: 8, color: COLORS.muted }}>
+              Uploading encrypted file to Bundlr…
             </div>
-          ))}
-        </div>
+          )}
+          {uploadErr && (
+            <div style={{ marginTop: 8, color: "tomato" }}>{uploadErr}</div>
+          )}
+          {arweaveId && (
+            <div style={{ marginTop: 10 }}>
+              <div style={{ marginBottom: 6 }}>
+                Stored encrypted data on Arweave (via Bundlr):
+              </div>
+              <div>
+                <a
+                  href={`https://devnet.irys.xyz/tx/${arweaveId}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  style={{ color: COLORS.aqua, textDecoration: "none", marginRight: 12 }}
+                >
+                  View on Arweave Devnet →
+                </a>
+                <a
+                  href={`https://gateway.irys.xyz/${arweaveId}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  style={{ color: COLORS.aqua, textDecoration: "none" }}
+                >
+                  Retrieve Data →
+                </a>
+              </div>
+            </div>
+          )}
+          {lastSig && (
+            <div style={{ marginTop: 10 }}>
+              <a
+                href={`https://explorer.solana.com/tx/${lastSig}?cluster=devnet`}
+                target="_blank"
+                rel="noreferrer"
+                style={{ color: COLORS.aqua, textDecoration: "none" }}
+              >
+                View memo transaction →
+              </a>
+            </div>
+          )}
 
-        <div style={styles.chatInputRow}>
-          <input
-            style={styles.input}
-            placeholder="Enter a symptom or health question…"
-            value={aiInput}
-            onChange={(e) => setAiInput(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && handleAiSend()}
-          />
-          <button style={styles.primaryBtn} onClick={handleAiSend}>Ask</button>
-        </div>
-      </section>
-    </main>
-
-    {/* Footer mini note to mirror your site vibe */}
-    <footer style={styles.footer}>
-      <span style={{ color: COLORS.muted }}>Proudly built on</span>
-      <span style={styles.solanaBadge}>Solana</span>
-    </footer>
+          {/* Decrypt preview */}
+{decryptedPreview && (
+  <div style={{ marginTop: 12 }}>
+    <div style={{ color: COLORS.muted, marginBottom: 6 }}>Decrypted Preview:</div>
+    {decryptedPreview.json ? (
+      <pre
+        style={{
+          whiteSpace: "pre-wrap",
+          background: "#0e131b",
+          border: `1px solid ${COLORS.border}`,
+          padding: 12,
+          borderRadius: 10,
+          maxHeight: 300,
+          overflow: "auto",
+        }}
+      >
+        {JSON.stringify(decryptedPreview.json, null, 2)}
+      </pre>
+    ) : (
+      <pre
+        style={{
+          whiteSpace: "pre-wrap",
+          background: "#0e131b",
+          border: `1px solid ${COLORS.border}`,
+          padding: 12,
+          borderRadius: 10,
+          maxHeight: 300,
+          overflow: "auto",
+        }}
+      >
+        {decryptedPreview.text}
+      </pre>
+    )}
   </div>
-);
+)}
+
+{decryptedBlobUrl && lastUpload && (
+  <div style={{ marginTop: 12 }}>
+    {/* Show inline if image */}
+    {lastUpload.mime.startsWith("image/") && (
+      <img
+        src={decryptedBlobUrl}
+        alt="Decrypted preview"
+        style={{ maxWidth: "100%", borderRadius: 10, border: `1px solid ${COLORS.border}` }}
+      />
+    )}
+
+    {/* Show inline if PDF */}
+    {lastUpload.mime === "application/pdf" && (
+      <iframe
+        src={decryptedBlobUrl}
+        style={{ width: "100%", height: 420, border: `1px solid ${COLORS.border}`, borderRadius: 10 }}
+        title="Decrypted PDF"
+      />
+    )}
+
+    {/* Fallback: download/open link */}
+    <div style={{ marginTop: 8 }}>
+      <a
+        href={decryptedBlobUrl}
+        download={`healthkey.${lastUpload.mime.split("/")[1] || "bin"}`}
+        style={{ color: COLORS.aqua, textDecoration: "none", marginRight: 12 }}
+      >
+        Download Decrypted File →
+      </a>
+      <a
+        href={decryptedBlobUrl}
+        target="_blank"
+        rel="noreferrer"
+        style={{ color: COLORS.aqua, textDecoration: "none" }}
+      >
+        Open in New Tab →
+      </a>
+    </div>
+  </div>
+)}
+
+        </section>
+
+        {/* AI Doctor */}
+        <section style={styles.card}>
+          <div style={styles.cardHeaderRow}>
+            <div>Ask HealthKey</div>
+            <span style={styles.pillMuted}>This is information only · Not medical advice</span>
+          </div>
+
+          <div style={styles.chatBox}>
+            {chat.map((m, i) => (
+              <div
+                key={i}
+                style={{
+                  ...styles.msg,
+                  ...(m.role === "ai" ? styles.msgAI : styles.msgUser),
+                }}
+              >
+                {m.text}
+              </div>
+            ))}
+          </div>
+
+          <div style={styles.chatInputRow}>
+            <input
+              style={styles.input}
+              placeholder="Enter a symptom or health question…"
+              value={aiInput}
+              onChange={(e) => setAiInput(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleAiSend()}
+            />
+            <button style={styles.primaryBtn} onClick={handleAiSend}>Ask</button>
+          </div>
+        </section>
+      </main>
+
+      {/* Footer mini note to mirror your site vibe */}
+      <footer style={styles.footer}>
+        <span style={{ color: COLORS.muted }}>Proudly built on</span>
+        <span style={styles.solanaBadge}>Solana</span>
+      </footer>
+    </div>
+  );
 } // ← closes: export default function App()
 
 function Metric({ label, value }: { label: string; value: string | number }) {
@@ -646,11 +847,6 @@ const styles: Record<string, React.CSSProperties> = {
     backdropFilter: "blur(6px)",
   },
   logoWrap: { display: "flex", alignItems: "center", gap: 10 },
-  logoImg: {
-  width: 48,   // increase size here
-  height: 48,  // keep square proportions, adjust if needed
-  objectFit: "contain",
-},
   logoText: { fontWeight: 800, letterSpacing: 1, color: COLORS.green },
   nav: { display: "flex", gap: 18, alignItems: "center" },
   navLink: { color: COLORS.muted, textDecoration: "none", fontSize: 14 },
@@ -665,7 +861,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
 
   main: {
-    width: "96vw", // fill most of the screen width
+    width: "96vw",
     margin: "26px auto 40px",
     padding: "0 18px",
     display: "grid",
