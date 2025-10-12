@@ -8,47 +8,43 @@ import { WebBundlr } from "@bundlr-network/client";
 import healthKeyLogo from "./assets/healthkey-logo.png";
 
 /** -----------------------------------------------------------
- * HealthKey Dashboard (MVP)
- * - Original UI + Colors, plus:
- *   • Records table (mock data) + filters + search
- *   • Consent toggle (mocked)
- *   • Decrypt simulation button (mock)
- *   • Disabled Export button with tooltip
- *   • Record detail panel (right column)
- *   • Audit log panel (placeholder with hints)
- *   • Upload "sheet" (stub) opened from button
- *   • Badges, skeletons, empty/error states
+ * HealthKey Dashboard (MVP, Devnet)
+ * - Bundlr/Irys devnet endpoint: https://devnet.bundlr.network
+ * - Client-side AES-GCM encryption for uploads
+ * - Manual vitals + labs → encrypted upload
+ * - Records table (dynamic + persisted in localStorage)
+ * - Decrypt simulation + consent toggles (mock)
+ * - Retrieve & decrypt last upload, inline preview for JSON/text/image/PDF
+ * - Ask HealthKey chat box (local endpoint)
  * ---------------------------------------------------------- */
 
 type HealthSummary = {
   steps: number;
   calories: number;
   sleepHrs: number;
-  sparkline: number[]; // 0..1 values
+  sparkline: number[];
 };
 type RewardSummary = { balance: number; earnedThisMonth: number };
-
 type QuickAction = { label: string; meta?: string; icon?: string };
 
 type ManualVitals = {
-  dateISO: string;       // e.g., "2025-09-20"
-  hr: number;            // heart rate
-  systolic: number;      // BP systolic
-  diastolic: number;     // BP diastolic
-  weightLbs: number;     // weight in lbs
-  note?: string;         // optional
+  dateISO: string;
+  hr: number;
+  systolic: number;
+  diastolic: number;
+  weightLbs: number;
+  note?: string;
 };
-
 
 type RecordStatus = "encrypted" | "decrypted" | "error" | "processing";
 type RecordRow = {
-  id: string;
+  id: string; // txId or local id
   name: string;
   type: "Vitals" | "Lab" | "Note" | "Imaging";
   date: string; // YYYY-MM-DD
   status: RecordStatus;
   consent: boolean;
-  sizeMB: number;
+  sizeMB: number | string;
 };
 
 const COLORS = {
@@ -80,7 +76,7 @@ const MOCK_ACTIONS: QuickAction[] = [
   { label: "Blood Pressure Logged", meta: "Apr 24, 2024", icon: "🩺" },
 ];
 
-// --- decrypt helper (AES-GCM) ---
+// --- AES-GCM decrypt ---
 async function decryptBytes(
   cipher: Uint8Array,
   iv: Uint8Array,
@@ -97,67 +93,40 @@ function formatSleep(hours: number) {
   return `${h}h ${m}m`;
 }
 
-// Basic sparkline
-function Sparkline({
-  points,
-  width = 520,
-  height = 90,
-}: {
-  points: number[];
-  width?: number;
-  height?: number;
-}) {
+// Sparkline
+function Sparkline({ points }: { points: number[] }) {
   const path = useMemo(() => {
     if (!points.length) return "";
     const pad = 6;
-    const w = width - pad * 2;
-    const h = height - pad * 2;
+    const width = 520 - pad * 2;
+    const height = 90 - pad * 2;
     const maxX = points.length - 1;
-    const toX = (i: number) => pad + (i / maxX) * w;
-    const toY = (v: number) => pad + (1 - v) * h;
+    const toX = (i: number) => pad + (i / maxX) * width;
+    const toY = (v: number) => pad + (1 - v) * height;
     return points.map((v, i) => `${i === 0 ? "M" : "L"} ${toX(i)} ${toY(v)}`).join(" ");
-  }, [points, width, height]);
+  }, [points]);
 
   return (
-    <svg width={width} height={height} style={{ display: "block" }}>
+    <svg width={520} height={90} style={{ display: "block" }}>
       <defs>
         <linearGradient id="spark" x1="0" x2="0" y1="0" y2="1">
           <stop offset="0%" stopColor={COLORS.aqua} stopOpacity="0.9" />
           <stop offset="100%" stopColor={COLORS.aqua} stopOpacity="0.2" />
         </linearGradient>
       </defs>
-      <path d={path} fill="none" stroke="url(#spark)" strokeWidth="3" strokeLinecap="round" />
+      <path d={path} fill="none" stroke="url(#spark)" strokeWidth={3} strokeLinecap="round" />
     </svg>
   );
 }
 
-// --- MIME sniffer for previews (jpg/png/gif/pdf/svg + extras) ---
+// --- MIME sniffer (basic) ---
 function sniffMime(u8: Uint8Array): string | null {
   // JPEG
-  if (u8.length > 3 && u8[0] === 0xff && u8[1] === 0xd8 && u8[2] === 0xff) return "image/jpeg";
+  if (u8.length > 2 && u8[0] === 0xff && u8[1] === 0xd8) return "image/jpeg";
   // PNG
-  if (
-    u8.length > 8 &&
-    u8[0] === 0x89 &&
-    u8[1] === 0x50 &&
-    u8[2] === 0x4e &&
-    u8[3] === 0x47 &&
-    u8[4] === 0x0d &&
-    u8[5] === 0x0a &&
-    u8[6] === 0x1a &&
-    u8[7] === 0x0a
-  )
-    return "image/png";
-  // GIF
-  if (
-    u8.length > 6 &&
-    u8[0] === 0x47 &&
-    u8[1] === 0x49 &&
-    u8[2] === 0x46 &&
-    u8[3] === 0x38 &&
-    (u8[4] === 0x39 || u8[4] === 0x37) &&
-    u8[5] === 0x61
-  )
+  if (u8.length > 3 && u8[0] === 0x89 && u8[1] === 0x50 && u8[2] === 0x4e) return "image/png";
+  // GIF (GIF8)
+  if (u8.length > 3 && u8[0] === 0x47 && u8[1] === 0x49 && u8[2] === 0x46 && u8[3] === 0x38)
     return "image/gif";
   // WEBP (RIFF....WEBP)
   if (
@@ -173,7 +142,7 @@ function sniffMime(u8: Uint8Array): string | null {
   )
     return "image/webp";
   // PDF
-  if (u8.length > 4 && u8[0] === 0x25 && u8[1] === 0x50 && u8[2] === 0x44 && u8[3] === 0x46)
+  if (u8.length > 3 && u8[0] === 0x25 && u8[1] === 0x50 && u8[2] === 0x44 && u8[3] === 0x46)
     return "application/pdf";
   // SVG (rough)
   const head = new TextDecoder().decode(u8.slice(0, 256)).trimStart().slice(0, 12).toLowerCase();
@@ -182,7 +151,7 @@ function sniffMime(u8: Uint8Array): string | null {
 }
 
 export default function App() {
-  // UI state (original)
+  // UI state
   const [preview, setPreview] = useState(true);
   const [aiInput, setAiInput] = useState("");
   const [chat, setChat] = useState<{ role: "user" | "ai"; text: string }[]>([
@@ -190,16 +159,14 @@ export default function App() {
     { role: "user", text: "What are the symptoms of influenza?" },
   ]);
 
-  // Data state (original)
+  // Data state
   const [summary, setSummary] = useState(MOCK_SUMMARY);
   const [rewards, setRewards] = useState(MOCK_REWARDS);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Wallet
+  // Wallet + connection
   const { publicKey, connected, sendTransaction, signTransaction, signMessage } = useWallet();
-
-  // Connection + tx helpers
   const { connection } = useConnection();
   const [sending, setSending] = useState(false);
   const [lastSig, setLastSig] = useState<string | null>(null);
@@ -209,28 +176,64 @@ export default function App() {
   const [arweaveId, setArweaveId] = useState<string | null>(null);
   const [uploadErr, setUploadErr] = useState<string | null>(null);
 
-  // Manual vitals UI state
+  // Manual vitals sheet
   const [showManualSheet, setShowManualSheet] = useState(false);
   const [manualVitals, setManualVitals] = useState<ManualVitals>({
-  dateISO: "", hr: 0, systolic: 0, diastolic: 0, weightLbs: 0, note: ""
+    dateISO: "",
+    hr: 0,
+    systolic: 0,
+    diastolic: 0,
+    weightLbs: 0,
+    note: "",
   });
   const [latestVitals, setLatestVitals] = useState<ManualVitals | null>(null);
 
-  const [lastUpload, setLastUpload] = useState<{
-    id: string;
-    iv: Uint8Array;
-    jwk: JsonWebKey;
-    mime: string;
-    name?: string;
-  } | null>(null);
+  // Manual lab form
+  const [labForm, setLabForm] = useState({
+    testName: "",
+    result: "",
+    unit: "",
+    date: "",
+  });
 
-  const [decryptedPreview, setDecryptedPreview] = useState<{ text?: string; json?: any } | null>(
-    null
-  );
-  const [decryptedBlobUrl, setDecryptedBlobUrl] = useState<string | null>(null);
+  type AuditEntry =
+  | { action: string; id: string; date: string }
+  | { key: string; icon: string; text: string; sub: string };
 
-  // Records (NEW MVP surface)
+const [audit, setAudit] = useState<AuditEntry[]>([]);
+
+useEffect(() => {
+  const savedAudit = localStorage.getItem("auditLog");
+  if (savedAudit) setAudit(JSON.parse(savedAudit));
+}, []);
+
+useEffect(() => {
+  localStorage.setItem("auditLog", JSON.stringify(audit));
+}, [audit]);
+
+
+// Load latest manual vitals from localStorage on mount
+useEffect(() => {
+  const savedVitals = localStorage.getItem("latestVitals");
+  if (savedVitals) {
+    try {
+      setLatestVitals(JSON.parse(savedVitals));
+    } catch (err) {
+      console.warn("Failed to parse saved vitals:", err);
+    }
+  }
+}, []);
+
+// Save latest manual vitals to localStorage whenever they change
+useEffect(() => {
+  if (latestVitals) {
+    localStorage.setItem("latestVitals", JSON.stringify(latestVitals));
+  }
+}, [latestVitals]);
+
+  // Persisted records
   const [records, setRecords] = useState<RecordRow[]>([
+    // Initial mock rows (will be merged with localStorage on mount)
     {
       id: "rec_001",
       name: "Blood Work — Basic Metabolic Panel",
@@ -273,67 +276,53 @@ export default function App() {
   const [selectedRec, setSelectedRec] = useState<RecordRow | null>(null);
   const [showUploadSheet, setShowUploadSheet] = useState(false);
 
-  const filteredRecords = records.filter((r) => {
-    const matchesQuery = r.name.toLowerCase().includes(recQuery.toLowerCase());
-    const matchesType = recType === "all" ? true : r.type === recType;
-    return matchesQuery && matchesType;
-  });
+  // Last uploaded item (to retrieve/decrypt)
+  const [lastUpload, setLastUpload] = useState<{
+    id: string;
+    iv: Uint8Array;
+    jwk: JsonWebKey;
+    mime: string;
+    name?: string;
+  } | null>(null);
 
-  // Audit log (placeholder)
-  const [audit, setAudit] = useState<
-    { icon: string; text: string; sub: string; key: string }[]
-  >([
-    {
-      key: "a1",
-      icon: "👁️",
-      text: `You viewed Daily Vitals — Week 38`,
-      sub: "2025-09-21 • reason: self-access • tx: HKeY…9h4",
-    },
-    {
-      key: "a2",
-      icon: "🔒",
-      text: `Consent revoked for Clinician Note — Follow-up`,
-      sub: "2025-09-19 • scope: clinician • tx: CoNs…1d2",
-    },
-    {
-      key: "a3",
-      icon: "🔓",
-      text: `Consent granted for Blood Work — Basic Metabolic Panel`,
-      sub: "2025-09-22 • scope: self • tx: GrNt…7aa",
-    },
-  ]);
+  // Decrypt preview states
+  const [decryptedPreview, setDecryptedPreview] = useState<{ text?: string; json?: any } | null>(
+    null
+  );
+  const [decryptedBlobUrl, setDecryptedBlobUrl] = useState<string | null>(null);
 
-  // Revoke object URL on unmount/when changed
+  // Revoke object URL when it changes/unmounts
   useEffect(() => {
     return () => {
       if (decryptedBlobUrl) URL.revokeObjectURL(decryptedBlobUrl);
     };
   }, [decryptedBlobUrl]);
 
-  // Handler: send a simple devnet Memo transaction
-  async function sendTestTx() {
-    if (!connected || !publicKey) {
-      setError("Connect your wallet first");
-      return;
+  // Load + persist records
+  useEffect(() => {
+    const saved = localStorage.getItem("records");
+    if (saved) {
+      try {
+        const parsed: RecordRow[] = JSON.parse(saved);
+        // Merge uniquely by id (saved first to preserve user data)
+        const map = new Map<string, RecordRow>();
+        parsed.forEach((r) => map.set(r.id, r));
+        records.forEach((r) => {
+          if (!map.has(r.id)) map.set(r.id, r);
+        });
+        setRecords(Array.from(map.values()));
+      } catch {
+        // ignore parse errors
+      }
     }
-    try {
-      setSending(true);
-      setError(null);
-      setLastSig(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // run once
 
-      const tx = new Transaction().add(createMemoInstruction("HealthKey demo: hello, devnet!"));
-      const sig = await sendTransaction(tx, connection);
-      await connection.confirmTransaction(sig, "confirmed");
-      setLastSig(sig);
-    } catch (e: any) {
-      console.error(e);
-      setError(e?.message ?? "Failed to send transaction");
-    } finally {
-      setSending(false);
-    }
-  }
+  useEffect(() => {
+    localStorage.setItem("records", JSON.stringify(records));
+  }, [records]);
 
-  // Actions (static)
+  // Actions (static for now)
   const actions = preview ? MOCK_ACTIONS : [];
 
   // Data load effect
@@ -381,6 +370,7 @@ export default function App() {
     };
   }, [preview, connected, publicKey]);
 
+  // Chat
   const handleAiSend = async () => {
     if (!aiInput.trim()) return;
     const q = aiInput.trim();
@@ -405,7 +395,7 @@ export default function App() {
     }
   };
 
-  // --- Encrypt + Upload (Bundlr devnet) + memo pointer ---
+  // --- AES-GCM encrypt ---
   async function encryptBytes(bytes: Uint8Array): Promise<{
     cipher: Uint8Array;
     iv: Uint8Array;
@@ -421,7 +411,76 @@ export default function App() {
     return { cipher: new Uint8Array(cipherBuf), iv, jwk };
   }
 
-  // --- Upload via transaction flow (browser-safe) ---
+// --- Persistence Hooks for LocalStorage (MVP state memory) ---
+
+// ✅ 1. Records Table (Labs + Vitals)
+useEffect(() => {
+  const savedRecords = localStorage.getItem("records");
+  if (savedRecords) {
+    try {
+      setRecords(JSON.parse(savedRecords));
+    } catch (err) {
+      console.warn("Failed to parse saved records:", err);
+    }
+  }
+}, []);
+
+useEffect(() => {
+  localStorage.setItem("records", JSON.stringify(records));
+}, [records]);
+
+// ✅ 2. Latest Manual Vitals
+useEffect(() => {
+  const savedVitals = localStorage.getItem("latestVitals");
+  if (savedVitals) {
+    try {
+      setLatestVitals(JSON.parse(savedVitals));
+    } catch (err) {
+      console.warn("Failed to parse saved vitals:", err);
+    }
+  }
+}, []);
+
+useEffect(() => {
+  if (latestVitals) {
+    localStorage.setItem("latestVitals", JSON.stringify(latestVitals));
+  }
+}, [latestVitals]);
+
+// ✅ 3. Manual Vitals Form Draft (so user doesn’t lose form inputs if tab reloads)
+useEffect(() => {
+  const draft = localStorage.getItem("manualVitalsDraft");
+  if (draft) {
+    try {
+      setManualVitals(JSON.parse(draft));
+    } catch (err) {
+      console.warn("Failed to parse manualVitalsDraft:", err);
+    }
+  }
+}, []);
+
+useEffect(() => {
+  localStorage.setItem("manualVitalsDraft", JSON.stringify(manualVitals));
+}, [manualVitals]);
+
+// ✅ 4. Audit Log (Consent + Upload + Decrypt activity)
+useEffect(() => {
+  const savedAudit = localStorage.getItem("auditLog");
+  if (savedAudit) {
+    try {
+      setAudit(JSON.parse(savedAudit));
+    } catch (err) {
+      console.warn("Failed to parse audit log:", err);
+    }
+  }
+}, []);
+
+useEffect(() => {
+  localStorage.setItem("auditLog", JSON.stringify(audit));
+}, [audit]);
+
+
+  // --- Upload (Bundlr/Irys Devnet) ---
   async function uploadEncryptedToBundlr(
     cipher: Uint8Array,
     contentType = "application/octet-stream",
@@ -431,42 +490,35 @@ export default function App() {
   ): Promise<string> {
     if (!connected || !publicKey) throw new Error("Connect your wallet first");
 
-    const bundlrWallet = {
-      publicKey,
-      signTransaction: async (tx: any) => {
-        if (!signTransaction) throw new Error("Wallet cannot sign transactions");
-        return await signTransaction(tx);
-      },
-      sendTransaction: async (tx: any) => {
-        return await sendTransaction(tx, connection);
-      },
-      signMessage: async (msg: Uint8Array) => {
-        if (!signMessage) throw new Error("Selected Wallet does not support message signing");
-        return await signMessage(msg);
-      },
-    };
-
     const bundlr = new WebBundlr(
       "https://devnet.bundlr.network",
       "solana",
-      bundlrWallet,
+      {
+        publicKey,
+        // these are provided by wallet adapter
+        signTransaction: async (tx: any) => {
+          if (!signTransaction) throw new Error("Wallet cannot sign transactions");
+          return await signTransaction(tx);
+        },
+        sendTransaction: async (tx: any) => {
+          return await sendTransaction(tx, connection);
+        },
+        signMessage: async (msg: Uint8Array) => {
+          if (!signMessage) throw new Error("Selected Wallet does not support message signing");
+          return await signMessage(msg);
+        },
+      },
       { providerUrl: "https://api.devnet.solana.com" }
     );
     await bundlr.ready();
 
-    const tags = [{ name: "Content-Type", value: contentType }];
-    const tx = await bundlr.createTransaction(cipher, { tags });
-    const price = await bundlr.getPrice(tx.size);
-    const fundAmt = price.multipliedBy(1.05).integerValue();
-
-    console.log("bundlr conf", {
-      api: bundlr.apiUrl,
-      currency: bundlr.currencyConfig?.name,
-      size: tx.size,
-      price: price.toString(),
-      fundAmt: fundAmt.toString(),
+    // Build tx directly from Uint8Array
+    const tx = await bundlr.createTransaction(cipher, {
+      tags: [{ name: "Content-Type", value: contentType }],
     });
 
+    const price = await bundlr.getPrice(tx.size);
+    const fundAmt = price.multipliedBy(1.05).integerValue();
     await bundlr.fund(fundAmt);
     await tx.sign();
     const res = await tx.upload();
@@ -474,14 +526,19 @@ export default function App() {
     const id = (res?.data?.id ?? res?.id ?? tx.id) as string;
     if (!id) throw new Error("Bundlr upload did not return an id");
 
+    // remember last upload for retrieval/decrypt
     if (iv && jwk) {
       setLastUpload({ id, iv, jwk, mime: contentType, name: fileName });
       setDecryptedPreview(null);
+      if (decryptedBlobUrl) {
+        URL.revokeObjectURL(decryptedBlobUrl);
+        setDecryptedBlobUrl(null);
+      }
     }
     return id;
   }
 
-  // --- Select + Encrypt + Upload + Memo pointer ---
+  // --- File flow: select + encrypt + upload + memo
   async function onSelectFile(file: File) {
     if (!connected || !publicKey) {
       setError("Connect your wallet first");
@@ -505,7 +562,7 @@ export default function App() {
       );
       setArweaveId(txId);
 
-      // Optional: memo with pointer
+      // optional memo pointer
       try {
         const tx = new Transaction().add(createMemoInstruction(`healthkey:uploaded:${txId}`));
         tx.feePayer = publicKey!;
@@ -522,28 +579,37 @@ export default function App() {
         );
         setLastSig(sig);
 
-        // log to audit (placeholder)
+        // record row (generic)
+        setRecords((rows) => [
+          {
+            id: txId,
+            name: file.name || "Upload",
+            type: file.type.startsWith("image/")
+              ? "Imaging"
+              : file.type.includes("json")
+              ? "Note"
+              : "Note",
+            date: new Date().toISOString().slice(0, 10),
+            status: "encrypted",
+            consent: true,
+            sizeMB: +(buf.byteLength / (1024 * 1024)).toFixed(2),
+          },
+          ...rows,
+        ]);
+
+        // audit (placeholder)
         setAudit((list) => [
           {
             key: `u-${Date.now()}`,
             icon: "⬆️",
-            text: `Uploaded ${file.name}`,
+            text: `Uploaded ${file.name || "file"}`,
             sub: `now • tx: ${txId.slice(0, 4)}…${txId.slice(-3)}`,
           },
           ...list,
         ]);
       } catch (err: any) {
-        try {
-          const simTx = new Transaction().add(createMemoInstruction(`healthkey:uploaded:${txId}`));
-          const sim = await connection.simulateTransaction(simTx, {
-            sigVerify: false,
-            commitment: "processed",
-          });
-          console.log("simulate err:", sim.value.err, "logs:", sim.value.logs);
-        } catch {}
         console.error("sendTransaction error:", err);
         setError(err?.message ?? "Failed to send memo tx");
-        return;
       }
     } catch (e: any) {
       console.error("upload flow error:", e);
@@ -552,80 +618,143 @@ export default function App() {
       setUploading(false);
       setShowUploadSheet(false);
     }
-  } // end onSelectFile
-async function onSubmitManualVitals() {
-  try {
-    if (!connected || !publicKey) {
-      setError("Connect your wallet first");
-      return;
-    }
-
-    // Basic validation
-    if (!manualVitals.dateISO || !manualVitals.hr || !manualVitals.systolic || !manualVitals.diastolic || !manualVitals.weightLbs) {
-      setError("Please fill all required fields.");
-      return;
-    }
-
-    // 1) Build a JSON payload (include metadata you might want later)
-    const payload = {
-      kind: "healthkey.vitals.manual",
-      createdAt: new Date().toISOString(),
-      owner: publicKey?.toBase58(),
-      data: manualVitals,           // the vitals
-      version: 1,
-    };
-    const json = new TextEncoder().encode(JSON.stringify(payload));
-
-    // 2) Encrypt client-side
-    const { cipher, iv, jwk } = await encryptBytes(json);
-
-    // 3) Upload encrypted JSON to Bundlr/Irys
-    const fileName = `vitals_${manualVitals.dateISO}.json`;
-    const txId = await uploadEncryptedToBundlr(cipher, "application/json", iv, jwk, fileName);
-    setArweaveId(txId);
-
-    // 4) Update dashboard UI
-    setLatestVitals(manualVitals);
-
-    // Add a row into Records table (type = Vitals)
-    setRecords((rows) => [
-      {
-        id: `rec_${Date.now()}`,
-        name: `Manual Vitals — ${manualVitals.dateISO}`,
-        type: "Vitals",
-        date: manualVitals.dateISO,
-        status: "encrypted",      // it is stored encrypted on-chain storage
-        consent: true,            // mock default
-        sizeMB: +(json.byteLength / (1024 * 1024)).toFixed(2),
-      },
-      ...rows,
-    ]);
-
-    // Add to audit log (placeholder)
-    setAudit((list) => [
-      {
-        key: `m-${Date.now()}`,
-        icon: "📝",
-        text: `Added manual vitals (${manualVitals.dateISO})`,
-        sub: `now • tx: ${txId.slice(0,4)}…${txId.slice(-3)}`,
-      },
-      ...list,
-    ]);
-
-    // Reset + close sheet
-    setManualVitals({ dateISO: "", hr: 0, systolic: 0, diastolic: 0, weightLbs: 0, note: "" });
-    setShowManualSheet(false);
-    setError(null);
-  } catch (e: any) {
-    console.error("manual vitals submit error:", e);
-    setError(e?.message ?? "Failed to submit manual vitals");
   }
-}
 
-  // --- Retrieve & Decrypt ---
+  // --- Manual vitals → encrypt + upload
+  async function onSubmitManualVitals() {
+    try {
+      if (!connected || !publicKey) {
+        setError("Connect your wallet first");
+        return;
+      }
+      // Basic validation
+      if (
+        !manualVitals.dateISO ||
+        !manualVitals.hr ||
+        !manualVitals.systolic ||
+        !manualVitals.diastolic ||
+        !manualVitals.weightLbs
+      ) {
+        setError("Please fill all required fields.");
+        return;
+      }
+
+      const payload = {
+        kind: "healthkey.vitals.manual",
+        createdAt: new Date().toISOString(),
+        owner: publicKey?.toBase58(),
+        data: manualVitals,
+        version: 1,
+      };
+      const json = new TextEncoder().encode(JSON.stringify(payload));
+      const { cipher, iv, jwk } = await encryptBytes(json);
+
+      const fileName = `vitals_${manualVitals.dateISO}.json`;
+      const txId = await uploadEncryptedToBundlr(cipher, "application/json", iv, jwk, fileName);
+      setArweaveId(txId);
+
+      setLatestVitals(manualVitals);
+      setRecords((rows) => [
+        {
+          id: txId,
+          name: `Manual Vitals — ${manualVitals.dateISO}`,
+          type: "Vitals",
+          date: manualVitals.dateISO,
+          status: "encrypted",
+          consent: true,
+          sizeMB: +(json.byteLength / (1024 * 1024)).toFixed(3),
+        },
+        ...rows,
+      ]);
+      setAudit((list) => [
+        {
+          key: `m-${Date.now()}`,
+          icon: "📝",
+          text: `Added manual vitals (${manualVitals.dateISO})`,
+          sub: `now • tx: ${txId.slice(0, 4)}…${txId.slice(-3)}`,
+        },
+        ...list,
+      ]);
+
+      setManualVitals({ dateISO: "", hr: 0, systolic: 0, diastolic: 0, weightLbs: 0, note: "" });
+      setShowManualSheet(false);
+      setError(null);
+    } catch (e: any) {
+      console.error("manual vitals submit error:", e);
+      setError(e?.message ?? "Failed to submit manual vitals");
+    }
+  }
+
+  // --- Persist manual vitals form draft (optional, nice UX touch) ---
+useEffect(() => {
+  const draft = localStorage.getItem("manualVitalsDraft");
+  if (draft) setManualVitals(JSON.parse(draft));
+}, []);
+
+useEffect(() => {
+  localStorage.setItem("manualVitalsDraft", JSON.stringify(manualVitals));
+}, [manualVitals]);
+
+  // --- Manual lab → encrypt + upload
+  async function handleLabSubmit() {
+    try {
+      if (!connected || !publicKey) {
+        setError("Connect your wallet first");
+        return;
+      }
+      const jsonData = {
+        kind: "healthkey.lab.manual",
+        createdAt: new Date().toISOString(),
+        owner: publicKey?.toBase58(),
+        type: "Lab" as const,
+        date: labForm.date || new Date().toISOString().split("T")[0],
+        testName: labForm.testName,
+        result: labForm.result,
+        unit: labForm.unit,
+        version: 1,
+      };
+
+      const jsonBytes = new TextEncoder().encode(JSON.stringify(jsonData));
+      const { cipher, iv, jwk } = await encryptBytes(jsonBytes);
+      const txId = await uploadEncryptedToBundlr(cipher, "application/json", iv, jwk, "lab.json");
+
+      setRecords((prev) => [
+        {
+          id: txId,
+          name: labForm.testName || "Lab Result",
+          type: "Lab",
+          date: jsonData.date,
+          status: "encrypted",
+          consent: true,
+          sizeMB: +(jsonBytes.length / (1024 * 1024)).toFixed(3),
+        },
+        ...prev,
+      ]);
+      setAudit((list) => [
+        {
+          key: `l-${Date.now()}`,
+          icon: "🧪",
+          text: `Added lab result (${jsonData.testName || "Lab"})`,
+          sub: `now • tx: ${txId.slice(0, 4)}…${txId.slice(-3)}`,
+        },
+        ...list,
+      ]);
+
+      setLabForm({ testName: "", result: "", unit: "", date: "" });
+      alert("✅ Lab record uploaded and added to table!");
+    } catch (e: any) {
+      console.error("Lab upload error:", e);
+      alert("❌ Failed to upload lab record");
+    }
+  }
+
+  // --- Retrieve & decrypt last upload
   const handleRetrieve = async () => {
     try {
-      if (!lastUpload) return;
+      if (!lastUpload) {
+        setDecryptedPreview({ text: "No recent encrypted upload to retrieve." });
+        return;
+      }
       const url = `https://gateway.irys.xyz/${lastUpload.id}`;
       const resp = await fetch(url);
       if (!resp.ok) throw new Error(`Fetch failed: ${resp.status}`);
@@ -661,7 +790,6 @@ async function onSubmitManualVitals() {
         setDecryptedPreview(null);
       }
 
-      // audit (placeholder)
       setAudit((list) => [
         {
           key: `r-${Date.now()}`,
@@ -679,7 +807,15 @@ async function onSubmitManualVitals() {
     }
   };
 
-  // Records UI helpers (mock)
+  // Records filters
+  const filteredRecords = records.filter((r) => {
+    const q = recQuery.trim().toLowerCase();
+    const matchesQuery = !q || r.name.toLowerCase().includes(q);
+    const matchesType = recType === "all" ? true : r.type === recType;
+    return matchesQuery && matchesType;
+  });
+
+  // Mock status / consent toggles
   function StatusBadge({ status }: { status: RecordStatus }) {
     const map: Record<
       RecordStatus,
@@ -769,7 +905,6 @@ async function onSubmitManualVitals() {
   }
 
   function simulateDecrypt(row: RecordRow) {
-    // flip status -> processing -> decrypted (mock)
     setRecords((prev) =>
       prev.map((r) => (r.id === row.id && r.status === "encrypted" ? { ...r, status: "processing" } : r))
     );
@@ -779,7 +914,6 @@ async function onSubmitManualVitals() {
           r.id === row.id && r.status === "processing" ? { ...r, status: "decrypted" } : r
         )
       );
-      // audit (placeholder)
       setAudit((list) => [
         {
           key: `d-${Date.now()}`,
@@ -792,21 +926,26 @@ async function onSubmitManualVitals() {
     }, 1200);
   }
 
-  function toggleConsent(id: string) {
-    setRecords((prev) =>
-      prev.map((r) => (r.id === id ? { ...r, consent: !r.consent } : r))
-    );
-    const rec = records.find((r) => r.id === id);
-    if (rec) {
-      setAudit((list) => [
-        {
-          key: `c-${Date.now()}`,
-          icon: rec.consent ? "🔒" : "🔓",
-          text: `${rec.consent ? "Consent revoked for" : "Consent granted for"} ${rec.name}`,
-          sub: "now • scope: mock • tx: mock",
-        },
-        ...list,
-      ]);
+  // Simple devnet memo tx
+  async function sendTestTx() {
+    if (!connected || !publicKey) {
+      setError("Connect your wallet first");
+      return;
+    }
+    try {
+      setSending(true);
+      setError(null);
+      setLastSig(null);
+
+      const tx = new Transaction().add(createMemoInstruction("HealthKey demo: hello, devnet!"));
+      const sig = await sendTransaction(tx, connection);
+      await connection.confirmTransaction(sig, "confirmed");
+      setLastSig(sig);
+    } catch (e: any) {
+      console.error(e);
+      setError(e?.message ?? "Failed to send transaction");
+    } finally {
+      setSending(false);
     }
   }
 
@@ -837,7 +976,7 @@ async function onSubmitManualVitals() {
 
       {/* Content Grid */}
       <main style={styles.main}>
-        {/* Left: Health Summary */}
+        {/* Health Summary */}
         <section style={styles.card}>
           <div style={styles.cardHeader}>Health Summary</div>
           {loading && <div style={{ color: COLORS.muted, marginTop: 6 }}>Loading data...</div>}
@@ -852,7 +991,7 @@ async function onSubmitManualVitals() {
           </div>
         </section>
 
-        {/* Right: Rewards */}
+        {/* Rewards */}
         <section style={styles.card}>
           <div style={styles.cardHeader}>Rewards Overview</div>
           {loading && <div style={{ color: COLORS.muted, marginTop: 6 }}>Loading data...</div>}
@@ -863,38 +1002,41 @@ async function onSubmitManualVitals() {
             </div>
             <div style={{ color: COLORS.muted, fontSize: 14 }}>
               Tokens Earned This Month
-              <div style={{ color: COLORS.text, fontSize: 16, marginTop: 4 }}>{rewards.earnedThisMonth}</div>
+              <div style={{ color: COLORS.text, fontSize: 16, marginTop: 4 }}>
+                {rewards.earnedThisMonth}
+              </div>
             </div>
           </div>
           <button style={styles.primaryBtn}>Claim Rewards</button>
         </section>
 
         {/* Latest Manual Vitals */}
-<section style={styles.card}>
-  <div style={styles.cardHeader}>Latest Manual Vitals</div>
-  {!latestVitals ? (
-    <div style={{ color: COLORS.muted, fontSize: 13 }}>No manual entries yet.</div>
-  ) : (
-    <div style={{ display: "grid", gap: 8, marginTop: 4 }}>
-      <div style={{ color: COLORS.muted, fontSize: 12 }}>{latestVitals.dateISO}</div>
-      <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
-        <div style={styles.metric}>
-          <div style={styles.metricLabel}>Heart Rate</div>
-          <div style={styles.metricValue}>{latestVitals.hr} bpm</div>
-        </div>
-        <div style={styles.metric}>
-          <div style={styles.metricLabel}>Blood Pressure</div>
-          <div style={styles.metricValue}>{latestVitals.systolic}/{latestVitals.diastolic} mmHg</div>
-        </div>
-        <div style={styles.metric}>
-          <div style={styles.metricLabel}>Weight</div>
-          <div style={styles.metricValue}>{latestVitals.weightLbs} lbs</div>
-        </div>
-      </div>
-    </div>
-  )}
-</section>
-
+        <section style={styles.card}>
+          <div style={styles.cardHeader}>Latest Manual Vitals</div>
+          {!latestVitals ? (
+            <div style={{ color: COLORS.muted, fontSize: 13 }}>No manual entries yet.</div>
+          ) : (
+            <div style={{ display: "grid", gap: 8, marginTop: 4 }}>
+              <div style={{ color: COLORS.muted, fontSize: 12 }}>{latestVitals.dateISO}</div>
+              <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+                <div style={styles.metric}>
+                  <div style={styles.metricLabel}>Heart Rate</div>
+                  <div style={styles.metricValue}>{latestVitals.hr} bpm</div>
+                </div>
+                <div style={styles.metric}>
+                  <div style={styles.metricLabel}>Blood Pressure</div>
+                  <div style={styles.metricValue}>
+                    {latestVitals.systolic}/{latestVitals.diastolic} mmHg
+                  </div>
+                </div>
+                <div style={styles.metric}>
+                  <div style={styles.metricLabel}>Weight</div>
+                  <div style={styles.metricValue}>{latestVitals.weightLbs} lbs</div>
+                </div>
+              </div>
+            </div>
+          )}
+        </section>
 
         {/* Quick Actions */}
         <section style={styles.card}>
@@ -922,10 +1064,6 @@ async function onSubmitManualVitals() {
             >
               Upload Health Data
             </button>
-            <button style={styles.secondaryBtn} onClick={() => setShowManualSheet(true)}>
-              Add Manual Vitals
-            </button>
-
             <input
               id="fileInput"
               type="file"
@@ -936,6 +1074,13 @@ async function onSubmitManualVitals() {
                 if (f) onSelectFile(f);
               }}
             />
+
+            <button style={styles.secondaryBtn} onClick={() => setShowManualSheet(true)}>
+              Add Manual Vitals
+            </button>
+            <button style={styles.secondaryBtn} onClick={handleLabSubmit} title="Upload lab (form below)">
+              Upload Lab (from form)
+            </button>
 
             <button
               style={styles.secondaryBtn}
@@ -949,6 +1094,44 @@ async function onSubmitManualVitals() {
             <button style={styles.secondaryBtn} onClick={handleRetrieve}>
               Retrieve & Decrypt Last Upload
             </button>
+          </div>
+
+          {/* Lab Form */}
+          <div style={{ marginTop: 16 }}>
+            <div style={styles.cardHeader}>Manual Lab Entry</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <input
+                placeholder="Test Name (e.g., Glucose)"
+                style={styles.input}
+                value={labForm.testName}
+                onChange={(e) => setLabForm({ ...labForm, testName: e.target.value })}
+              />
+              <input
+                placeholder="Result (e.g., 96)"
+                style={styles.input}
+                value={labForm.result}
+                onChange={(e) => setLabForm({ ...labForm, result: e.target.value })}
+              />
+              <input
+                placeholder="Unit (e.g., mg/dL)"
+                style={styles.input}
+                value={labForm.unit}
+                onChange={(e) => setLabForm({ ...labForm, unit: e.target.value })}
+              />
+              <input
+                type="date"
+                style={styles.input}
+                value={labForm.date}
+                onChange={(e) => setLabForm({ ...labForm, date: e.target.value })}
+              />
+              <button
+                style={styles.primaryBtn}
+                onClick={handleLabSubmit}
+                disabled={!labForm.testName || !labForm.result}
+              >
+                Upload Lab Result
+              </button>
+            </div>
           </div>
 
           {/* Upload sheet (stub) */}
@@ -990,102 +1173,111 @@ async function onSubmitManualVitals() {
               </div>
             </div>
           )}
+
           {/* Manual Vitals sheet */}
-{showManualSheet && (
-  <div style={styles.sheetOverlay} onClick={() => setShowManualSheet(false)}>
-    <div style={styles.sheet} onClick={(e) => e.stopPropagation()}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <div style={{ fontWeight: 700 }}>Add Manual Vitals</div>
-        <button style={styles.secondaryBtn} onClick={() => setShowManualSheet(false)}>
-          Close
-        </button>
-      </div>
+          {showManualSheet && (
+            <div style={styles.sheetOverlay} onClick={() => setShowManualSheet(false)}>
+              <div style={styles.sheet} onClick={(e) => e.stopPropagation()}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <div style={{ fontWeight: 700 }}>Add Manual Vitals</div>
+                  <button style={styles.secondaryBtn} onClick={() => setShowManualSheet(false)}>
+                    Close
+                  </button>
+                </div>
 
-      <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
-        <label style={{ fontSize: 13 }}>
-          Date
-          <input
-            type="date"
-            value={manualVitals.dateISO}
-            onChange={(e) => setManualVitals((v) => ({ ...v, dateISO: e.target.value }))}
-            style={{ ...styles.input, marginTop: 6 }}
-          />
-        </label>
+                <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
+                  <label style={{ fontSize: 13 }}>
+                    Date
+                    <input
+                      type="date"
+                      value={manualVitals.dateISO}
+                      onChange={(e) => setManualVitals((v) => ({ ...v, dateISO: e.target.value }))}
+                      style={{ ...styles.input, marginTop: 6 }}
+                    />
+                  </label>
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-          <label style={{ fontSize: 13 }}>
-            Heart Rate (bpm)
-            <input
-              type="number"
-              min={0}
-              value={manualVitals.hr || ""}
-              onChange={(e) => setManualVitals((v) => ({ ...v, hr: Number(e.target.value) }))}
-              style={{ ...styles.input, marginTop: 6 }}
-              placeholder="e.g., 67"
-            />
-          </label>
-          <label style={{ fontSize: 13 }}>
-            Weight (lbs)
-            <input
-              type="number"
-              min={0}
-              value={manualVitals.weightLbs || ""}
-              onChange={(e) => setManualVitals((v) => ({ ...v, weightLbs: Number(e.target.value) }))}
-              style={{ ...styles.input, marginTop: 6 }}
-              placeholder="e.g., 190"
-            />
-          </label>
-        </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                    <label style={{ fontSize: 13 }}>
+                      Heart Rate (bpm)
+                      <input
+                        type="number"
+                        min={0}
+                        value={manualVitals.hr || ""}
+                        onChange={(e) => setManualVitals((v) => ({ ...v, hr: Number(e.target.value) }))}
+                        style={{ ...styles.input, marginTop: 6 }}
+                        placeholder="e.g., 67"
+                      />
+                    </label>
+                    <label style={{ fontSize: 13 }}>
+                      Weight (lbs)
+                      <input
+                        type="number"
+                        min={0}
+                        value={manualVitals.weightLbs || ""}
+                        onChange={(e) =>
+                          setManualVitals((v) => ({ ...v, weightLbs: Number(e.target.value) }))
+                        }
+                        style={{ ...styles.input, marginTop: 6 }}
+                        placeholder="e.g., 190"
+                      />
+                    </label>
+                  </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-          <label style={{ fontSize: 13 }}>
-            BP Systolic
-            <input
-              type="number"
-              min={0}
-              value={manualVitals.systolic || ""}
-              onChange={(e) => setManualVitals((v) => ({ ...v, systolic: Number(e.target.value) }))}
-              style={{ ...styles.input, marginTop: 6 }}
-              placeholder="e.g., 122"
-            />
-          </label>
-          <label style={{ fontSize: 13 }}>
-            BP Diastolic
-            <input
-              type="number"
-              min={0}
-              value={manualVitals.diastolic || ""}
-              onChange={(e) => setManualVitals((v) => ({ ...v, diastolic: Number(e.target.value) }))}
-              style={{ ...styles.input, marginTop: 6 }}
-              placeholder="e.g., 74"
-            />
-          </label>
-        </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                    <label style={{ fontSize: 13 }}>
+                      BP Systolic
+                      <input
+                        type="number"
+                        min={0}
+                        value={manualVitals.systolic || ""}
+                        onChange={(e) =>
+                          setManualVitals((v) => ({ ...v, systolic: Number(e.target.value) }))
+                        }
+                        style={{ ...styles.input, marginTop: 6 }}
+                        placeholder="e.g., 122"
+                      />
+                    </label>
+                    <label style={{ fontSize: 13 }}>
+                      BP Diastolic
+                      <input
+                        type="number"
+                        min={0}
+                        value={manualVitals.diastolic || ""}
+                        onChange={(e) =>
+                          setManualVitals((v) => ({ ...v, diastolic: Number(e.target.value) }))
+                        }
+                        style={{ ...styles.input, marginTop: 6 }}
+                        placeholder="e.g., 74"
+                      />
+                    </label>
+                  </div>
 
-        <label style={{ fontSize: 13 }}>
-          Note (optional)
-          <textarea
-            value={manualVitals.note || ""}
-            onChange={(e) => setManualVitals((v) => ({ ...v, note: e.target.value }))}
-            style={{ ...styles.input, marginTop: 6, minHeight: 90, resize: "vertical" }}
-            placeholder="Any extra context..."
-          />
-        </label>
+                  <label style={{ fontSize: 13 }}>
+                    Note (optional)
+                    <textarea
+                      value={manualVitals.note || ""}
+                      onChange={(e) => setManualVitals((v) => ({ ...v, note: e.target.value }))}
+                      style={{ ...styles.input, marginTop: 6, minHeight: 90, resize: "vertical" }}
+                      placeholder="Any extra context..."
+                    />
+                  </label>
 
-        <button style={{ ...styles.primaryBtn, marginTop: 6 }} onClick={onSubmitManualVitals}>
-          Save & Upload
-        </button>
-        <div style={{ color: COLORS.muted, fontSize: 12 }}>
-          This will encrypt your entry client-side and store it via Irys (Arweave devnet).
-        </div>
-      </div>
-    </div>
-  </div>
-)}
+                  <button style={{ ...styles.primaryBtn, marginTop: 6 }} onClick={onSubmitManualVitals}>
+                    Save & Upload
+                  </button>
+                  <div style={{ color: COLORS.muted, fontSize: 12 }}>
+                    This will encrypt your entry client-side and store it via Irys (Arweave devnet).
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Upload status + links */}
           {uploading && (
-            <div style={{ marginTop: 8, color: COLORS.muted }}>Uploading encrypted file to Bundlr…</div>
+            <div style={{ marginTop: 8, color: COLORS.muted }}>
+              Uploading encrypted file to Bundlr…
+            </div>
           )}
           {uploadErr && <div style={{ marginTop: 8, color: "tomato" }}>{uploadErr}</div>}
           {arweaveId && (
@@ -1175,7 +1367,7 @@ async function onSubmitManualVitals() {
           )}
         </section>
 
-        {/* NEW: Records Table (left, spans both columns on small screens) */}
+        {/* Records Table */}
         <section style={{ ...styles.card, gridColumn: "1 / -1" }}>
           <div style={styles.cardHeaderRow}>
             <div>
@@ -1279,7 +1471,24 @@ async function onSubmitManualVitals() {
                         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                           <Switch
                             checked={row.consent}
-                            onChange={() => toggleConsent(row.id)}
+                            onChange={() => {
+                              setRecords((prev) =>
+                                prev.map((r) =>
+                                  r.id === row.id ? { ...r, consent: !r.consent } : r
+                                )
+                              );
+                              setAudit((list) => [
+                                {
+                                  key: `c-${Date.now()}`,
+                                  icon: !row.consent ? "🔓" : "🔒",
+                                  text: `${!row.consent ? "Consent granted for" : "Consent revoked for"} ${
+                                    row.name
+                                  }`,
+                                  sub: "now • scope: mock • tx: mock",
+                                },
+                                ...list,
+                              ]);
+                            }}
                             aria-label="Toggle consent"
                           />
                           <span style={{ fontSize: 12, color: COLORS.muted }}>
@@ -1311,12 +1520,35 @@ async function onSubmitManualVitals() {
                 )}
               </tbody>
             </table>
+<section style={styles.card}>
+  <div style={styles.cardHeader}>Audit Log</div>
+  {audit.length === 0 ? (
+    <p style={{ color: COLORS.muted }}>No audit entries yet.</p>
+  ) : (
+    <ul style={{ fontSize: 13, color: COLORS.text }}>
+  {audit.map((entry, i) => (
+    <li key={i}>
+      {"action" in entry ? (
+        <>
+          [{entry.date.split("T")[0]}] {entry.action} → <code>{entry.id}</code>
+        </>
+      ) : (
+        <>
+          {entry.icon} {entry.text} — {entry.sub}
+        </>
+      )}
+    </li>
+  ))}
+</ul>
+  )}
+</section>
+
           </div>
           <div style={{ color: COLORS.muted, fontSize: 12, marginTop: 6 }}>
             Note: Decrypt, consent enforcement, and export are mocked. Replace handlers with real logic once available.
           </div>
 
-          {/* Details + Audit (two-column responsive) */}
+          {/* Details + Audit */}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 12 }}>
             {/* Record detail */}
             <div style={styles.cardInner}>
@@ -1372,47 +1604,11 @@ async function onSubmitManualVitals() {
             </div>
 
             {/* Audit log */}
-            <div style={styles.cardInner}>
-              <div style={{ fontWeight: 700, marginBottom: 6 }}>Audit Log</div>
-              <div style={{ color: COLORS.muted, fontSize: 12, marginBottom: 8 }}>
-                Who accessed what, when, and why.
-              </div>
-              <div style={{ display: "grid", gap: 8, maxHeight: 320, overflowY: "auto", paddingRight: 6 }}>
-                {audit.map((a) => (
-                  <div key={a.key} style={{ display: "flex", gap: 10, border: `1px solid ${COLORS.border}`, borderRadius: 12, padding: 10 }}>
-                    <div style={{ opacity: 0.8 }}>{a.icon}</div>
-                    <div>
-                      <div style={{ fontSize: 14 }}>{a.text}</div>
-                      <div style={{ color: COLORS.muted, fontSize: 12 }}>{a.sub}</div>
-                    </div>
-                  </div>
-                ))}
-                {/* Hookup hint */}
-                <div
-                  style={{
-                    display: "flex",
-                    gap: 10,
-                    border: `1px dashed ${COLORS.border}`,
-                    borderRadius: 12,
-                    padding: 10,
-                  }}
-                >
-                  <div style={{ opacity: 0.8 }}>💡</div>
-                  <div>
-                    <div style={{ fontSize: 14 }}>
-                      Hook this panel to your on-chain events and storage reads.
-                    </div>
-                    <div style={{ color: COLORS.muted, fontSize: 12 }}>
-                      For MVP: write a log entry each time decrypt() succeeds or a consent switch is toggled.
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
+            <AuditPanel />
           </div>
         </section>
 
-        {/* AI Doctor / Ask HealthKey */}
+        {/* AI Doctor */}
         <section style={styles.card}>
           <div style={styles.cardHeaderRow}>
             <div>Ask HealthKey</div>
@@ -1455,6 +1651,80 @@ async function onSubmitManualVitals() {
       </footer>
     </div>
   );
+
+  // local Audit panel state (kept inside component so it can access setAudit above)
+  function AuditPanel() {
+    const [audit, setAudit] = useState<
+      { icon: string; text: string; sub: string; key: string }[]
+    >([
+      {
+        key: "a1",
+        icon: "👁️",
+        text: `You viewed Daily Vitals — Week 38`,
+        sub: "2025-09-21 • reason: self-access • tx: HKeY…9h4",
+      },
+      {
+        key: "a2",
+        icon: "🔒",
+        text: `Consent revoked for Clinician Note — Follow-up`,
+        sub: "2025-09-19 • scope: clinician • tx: CoNs…1d2",
+      },
+      {
+        key: "a3",
+        icon: "🔓",
+        text: `Consent granted for Blood Work — Basic Metabolic Panel`,
+        sub: "2025-09-22 • scope: self • tx: GrNt…7aa",
+      },
+    ]);
+
+    // Expose setter via closure from parent calls
+    // We already call setAudit above (same function here)
+    (window as any).__setAudit = setAudit;
+
+    return (
+      <div style={styles.cardInner}>
+        <div style={{ fontWeight: 700, marginBottom: 6 }}>Audit Log</div>
+        <div style={{ color: COLORS.muted, fontSize: 12, marginBottom: 8 }}>
+          Who accessed what, when, and why.
+        </div>
+        <div style={{ display: "grid", gap: 8, maxHeight: 320, overflowY: "auto", paddingRight: 6 }}>
+          {audit.map((a) => (
+            <div
+              key={a.key}
+              style={{ display: "flex", gap: 10, border: `1px solid ${COLORS.border}`, borderRadius: 12, padding: 10 }}
+            >
+              <div style={{ opacity: 0.8 }}>{a.icon}</div>
+              <div>
+                <div style={{ fontSize: 14 }}>{a.text}</div>
+                <div style={{ color: COLORS.muted, fontSize: 12 }}>{a.sub}</div>
+              </div>
+            </div>
+          ))}
+
+          {/* Hookup hint */}
+          <div
+            style={{
+              display: "flex",
+              gap: 10,
+              border: `1px dashed ${COLORS.border}`,
+              borderRadius: 12,
+              padding: 10,
+            }}
+          >
+            <div style={{ opacity: 0.8 }}>💡</div>
+            <div>
+              <div style={{ fontSize: 14 }}>
+                Hook this panel to your on-chain events and storage reads.
+              </div>
+              <div style={{ color: COLORS.muted, fontSize: 12 }}>
+                For MVP: write a log entry each time decrypt() succeeds or a consent switch is toggled.
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 } // end App
 
 function Metric({ label, value }: { label: string; value: string | number }) {
