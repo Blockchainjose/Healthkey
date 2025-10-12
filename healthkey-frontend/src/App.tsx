@@ -5,7 +5,7 @@ import { LocalDataSource } from "./lib/data";
 import { Transaction } from "@solana/web3.js";
 import { createMemoInstruction } from "@solana/spl-memo";
 import { WebBundlr } from "@bundlr-network/client";
-import healthKeyLogo from "./assets/healthkey-logo.png";
+import healthKeyLogo from "./assets/Healthkey-Logo.png";
 
 /** -----------------------------------------------------------
  * HealthKey Dashboard (MVP, Devnet)
