@@ -9,7 +9,7 @@ export interface DataSource {
 
 // src/lib/data.ts
 export const LocalDataSource = {
-  async getHealthSnapshot(userId: string) {
+  async getHealthSnapshot(_userId: string) {
     // For now: return mock data so the UI works
     return {
       steps: 8456,
@@ -19,7 +19,7 @@ export const LocalDataSource = {
     };
   },
 
-  async getRewards(userId: string) {
+  async getRewards(_userId: string) {
     return {
       balance: 1225,
       earnedThisMonth: 350,

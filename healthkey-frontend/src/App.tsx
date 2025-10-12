@@ -513,9 +513,9 @@ useEffect(() => {
     await bundlr.ready();
 
     // Build tx directly from Uint8Array
-    const tx = await bundlr.createTransaction(cipher, {
-      tags: [{ name: "Content-Type", value: contentType }],
-    });
+    const tx = await bundlr.createTransaction(Buffer.from(cipher), {
+  tags: [{ name: "Content-Type", value: contentType }],
+});
 
     const price = await bundlr.getPrice(tx.size);
     const fundAmt = price.multipliedBy(1.05).integerValue();
@@ -523,7 +523,7 @@ useEffect(() => {
     await tx.sign();
     const res = await tx.upload();
 
-    const id = (res?.data?.id ?? res?.id ?? tx.id) as string;
+    const id = ((res as any)?.data?.id || (res as any)?.id || tx.id) as string;
     if (!id) throw new Error("Bundlr upload did not return an id");
 
     // remember last upload for retrieval/decrypt

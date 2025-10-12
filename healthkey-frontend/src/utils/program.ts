@@ -6,8 +6,8 @@ export function getProgram(wallet: any): Program {
   const provider = new AnchorProvider(connection, wallet, {
     preflightCommitment: "processed",
   });
-
-  const programId = new web3.PublicKey("2aPJ91YqkdpSTucNwBxGa42uwoHUCdhx6A4qeBkBrNkJ");
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const _programId = new web3.PublicKey("2aPJ91YqkdpSTucNwBxGa42uwoHUCdhx6A4qeBkBrNkJ");
 
   return new Program(idl as any, provider);
 }
