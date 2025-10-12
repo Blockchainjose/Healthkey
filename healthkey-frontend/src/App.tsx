@@ -151,7 +151,7 @@ function sniffMime(u8: Uint8Array): string | null {
 }
 
 export default function App() {
-  // UI state
+  // UI state (original)
   const [preview, setPreview] = useState(true);
   const [aiInput, setAiInput] = useState("");
   const [chat, setChat] = useState<{ role: "user" | "ai"; text: string }[]>([
@@ -159,7 +159,7 @@ export default function App() {
     { role: "user", text: "What are the symptoms of influenza?" },
   ]);
 
-  // Data state
+  // Data state (original)
   const [summary, setSummary] = useState(MOCK_SUMMARY);
   const [rewards, setRewards] = useState(MOCK_REWARDS);
   const [loading, setLoading] = useState(false);
@@ -322,7 +322,7 @@ useEffect(() => {
     localStorage.setItem("records", JSON.stringify(records));
   }, [records]);
 
-  // Actions (static for now)
+  // Actions (static)
   const actions = preview ? MOCK_ACTIONS : [];
 
   // Data load effect
